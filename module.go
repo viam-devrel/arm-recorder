@@ -494,7 +494,7 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.arm.MoveToJointPositions(entryCtx, sess.Frames[0], nil); err != nil {
+			if err := s.arm.MoveThroughJointPositions(entryCtx, [][]float64{sess.Frames[0]}, s.moveOpts, nil); err != nil {
 				captureErr(err)
 			}
 		}()
