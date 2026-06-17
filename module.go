@@ -205,6 +205,7 @@ func (s *armRecorderRecorder) readGripperPosition(ctx context.Context) (float64,
 	if !ok {
 		return 0, fmt.Errorf("get_position response missing key %q", s.gripperKey)
 	}
+	// DoCommand numeric values arrive as float64 via protobuf Struct encoding.
 	f, ok := v.(float64)
 	if !ok {
 		return 0, fmt.Errorf("gripper position %q is not a number (got %T)", s.gripperKey, v)
@@ -287,6 +288,17 @@ func (s *armRecorderRecorder) startRecording(cmd map[string]interface{}) (map[st
 	return map[string]interface{}{"status": "recording", "session": session}, nil
 }
 
+// failRecording sets the last error, resets state to idle, and clears worker fields under the lock.
+// Callers should log the error before or after calling this.
+func (s *armRecorderRecorder) failRecording(err error) {
+	s.mu.Lock()
+	s.lastError = err.Error()
+	s.state = stateIdle
+	s.workerCancel = nil
+	s.workerDone = nil
+	s.mu.Unlock()
+}
+
 func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	interval := time.Duration(float64(time.Second) / s.freqHz)
@@ -300,12 +312,7 @@ func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}
 			joints, err := s.arm.JointPositions(ctx, nil)
 			if err != nil {
 				s.logger.Errorf("recording stopped: joint read failed: %v", err)
-				s.mu.Lock()
-				s.lastError = err.Error()
-				s.state = stateIdle
-				s.workerCancel = nil
-				s.workerDone = nil
-				s.mu.Unlock()
+				s.failRecording(err)
 				return
 			}
 			frame := make([]float64, len(joints))
@@ -316,12 +323,7 @@ func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}
 				gripPos, err = s.readGripperPosition(ctx)
 				if err != nil {
 					s.logger.Errorf("recording stopped: gripper read failed: %v", err)
-					s.mu.Lock()
-					s.lastError = err.Error()
-					s.state = stateIdle
-					s.workerCancel = nil
-					s.workerDone = nil
-					s.mu.Unlock()
+					s.failRecording(err)
 					return
 				}
 			}
@@ -410,6 +412,18 @@ func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]inter
 		}
 	}
 
+	// Gripper validation.
+	if sess.HasGripper && s.gripper == nil {
+		return nil, fmt.Errorf("session %q has gripper data but no gripper is configured", session)
+	}
+	if sess.HasGripper && len(sess.GripperPositions) != len(sess.Frames) {
+		return nil, fmt.Errorf("session %q gripper position count (%d) does not match frame count (%d)", session, len(sess.GripperPositions), len(sess.Frames))
+	}
+	useGripper := sess.HasGripper && s.gripper != nil
+	if !sess.HasGripper && s.gripper != nil {
+		s.logger.Infof("session %q has no gripper data; playing arm only (gripper configured but will not be moved)", session)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state != stateIdle {
@@ -422,12 +436,12 @@ func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]inter
 	s.session = session
 	s.workerCancel = cancel
 	s.workerDone = done
-	go s.playLoop(wctx, done, sess)
+	go s.playLoop(wctx, done, sess, useGripper)
 	s.logger.Infof("started playback of session %q (%d frames)", session, len(sess.Frames))
 	return map[string]interface{}{"status": "playing", "session": session, "frame_count": len(sess.Frames)}, nil
 }
 
-func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, sess *Session) {
+func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, sess *Session, useGripper bool) {
 	defer close(done)
 	defer func() {
 		s.mu.Lock()
@@ -437,31 +451,149 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 		s.mu.Unlock()
 	}()
 
-	// Safe entry: move to the first frame and block until reached.
-	if err := s.arm.MoveToJointPositions(ctx, sess.Frames[0], nil); err != nil {
-		if ctx.Err() == nil {
-			s.logger.Errorf("playback aborted moving to first frame: %v", err)
+	// Guard against invalid frequency (belt-and-suspenders; play() already checked,
+	// but the gripper ticker divides by FrequencyHz so guard here too).
+	if sess.FrequencyHz <= 0 || math.IsNaN(sess.FrequencyHz) || math.IsInf(sess.FrequencyHz, 0) {
+		sess.FrequencyHz = defaultFrequencyHz
+	}
+
+	// -------------------------------------------------------------------------
+	// Safe entry: move arm to first frame, and (if useGripper) set gripper to
+	// first position — run both concurrently, abort on the first error or if
+	// the outer ctx is canceled.
+	// -------------------------------------------------------------------------
+	{
+		entryCtx, entryCancel := context.WithCancel(ctx)
+		defer entryCancel()
+
+		var (
+			wg       sync.WaitGroup
+			firstErr error
+			errMu    sync.Mutex
+		)
+
+		// Helper to record the first error and cancel the sibling goroutine.
+		captureErr := func(err error) {
+			errMu.Lock()
+			if firstErr == nil {
+				firstErr = err
+			}
+			errMu.Unlock()
+			entryCancel()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.arm.MoveToJointPositions(entryCtx, sess.Frames[0], nil); err != nil {
+				captureErr(err)
+			}
+		}()
+
+		if useGripper {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := s.setGripperPosition(entryCtx, sess.GripperPositions[0]); err != nil {
+					captureErr(err)
+				}
+			}()
+		}
+
+		wg.Wait()
+
+		if firstErr != nil {
+			if ctx.Err() == nil {
+				s.logger.Errorf("playback aborted during safe entry: %v", firstErr)
+			}
+			return
+		}
+	}
+
+	// Only one frame — safe entry was the whole playback.
+	if len(sess.Frames) <= 1 {
+		s.logger.Infof("playback of session %q complete", sess.Name)
+		return
+	}
+
+	// -------------------------------------------------------------------------
+	// Main motion: arm via MoveThroughJointPositions (one blocking call) and
+	// gripper (if useGripper) via a ticker stepping through GripperPositions[1:].
+	// Both run under a shared cancelable sub-context (ctx2) so that if either
+	// errors the other is prompted to stop promptly.
+	// -------------------------------------------------------------------------
+	ctx2, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+
+	var (
+		wg2      sync.WaitGroup
+		firstErr error
+		errMu    sync.Mutex
+	)
+
+	captureErr2 := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+		cancel2()
+	}
+
+	// Arm goroutine: one call that blends through all remaining waypoints.
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		if err := s.arm.MoveThroughJointPositions(ctx2, sess.Frames[1:], s.moveOpts, nil); err != nil {
+			// If the context was canceled (by us or the outer stop) that's expected —
+			// don't treat it as a real error.
+			if ctx2.Err() != nil {
+				return
+			}
+			captureErr2(err)
+		}
+	}()
+
+	// Gripper goroutine: ticker aligned to the recording frequency.
+	if useGripper {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			interval := time.Duration(float64(time.Second) / sess.FrequencyHz)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for _, pos := range sess.GripperPositions[1:] {
+				select {
+				case <-ctx2.Done():
+					return
+				case <-ticker.C:
+					if err := s.setGripperPosition(ctx2, pos); err != nil {
+						if ctx2.Err() != nil {
+							return
+						}
+						captureErr2(err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	wg2.Wait()
+
+	// If the outer context was canceled, stop the arm.
+	if ctx.Err() != nil {
+		if err := s.arm.Stop(context.Background(), nil); err != nil {
+			s.logger.Errorf("arm.Stop after cancel failed: %v", err)
 		}
 		return
 	}
 
-	interval := time.Duration(float64(time.Second) / sess.FrequencyHz)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for i := 1; i < len(sess.Frames); i++ {
-		select {
-		case <-ctx.Done():
-			_ = s.arm.Stop(context.Background(), nil)
-			return
-		case <-ticker.C:
-			if err := s.arm.MoveToJointPositions(ctx, sess.Frames[i], nil); err != nil {
-				if ctx.Err() == nil {
-					s.logger.Errorf("playback aborted at frame %d: %v", i, err)
-				}
-				return
-			}
-		}
+	if firstErr != nil {
+		s.logger.Errorf("playback aborted during main motion: %v", firstErr)
+		return
 	}
+
 	s.logger.Infof("playback of session %q complete", sess.Name)
 }
 
