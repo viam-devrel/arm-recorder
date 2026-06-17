@@ -116,9 +116,25 @@ func (s *armRecorderRecorder) Readings(ctx context.Context, extra map[string]int
 		out["joints_error"] = err.Error()
 		return out, nil
 	}
-	out["joints"] = joints
+	out["joints"] = toInterfaceSlice(joints)
 	out["joint_count"] = len(joints)
 	return out, nil
+}
+
+func toInterfaceSlice(f []float64) []interface{} {
+	out := make([]interface{}, len(f))
+	for i, v := range f {
+		out[i] = v
+	}
+	return out
+}
+
+func toStringInterfaceSlice(s []string) []interface{} {
+	out := make([]interface{}, len(s))
+	for i, v := range s {
+		out[i] = v
+	}
+	return out
 }
 
 func argString(cmd map[string]interface{}, key string) (string, error) {
@@ -152,7 +168,7 @@ func (s *armRecorderRecorder) DoCommand(ctx context.Context, cmd map[string]inte
 		if err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"sessions": names}, nil
+		return map[string]interface{}{"sessions": toStringInterfaceSlice(names)}, nil
 	case "delete_session":
 		session, err := argString(cmd, "session")
 		if err != nil {
