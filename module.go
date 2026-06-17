@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -85,13 +86,18 @@ type armRecorderRecorder struct {
 	freqHz  float64
 	dataDir string
 
-	mu           sync.Mutex
-	state        string
-	session      string
-	frames       [][]float64
-	workerCancel context.CancelFunc
-	workerDone   chan struct{}
-	lastError    string
+	gripper    gripper.Gripper
+	gripperKey string
+	moveOpts   *arm.MoveOptions
+
+	mu               sync.Mutex
+	state            string
+	session          string
+	frames           [][]float64
+	gripperPositions []float64
+	workerCancel     context.CancelFunc
+	workerDone       chan struct{}
+	lastError        string
 }
 
 func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (sensor.Sensor, error) {
@@ -107,7 +113,8 @@ func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, raw
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("could not create data dir %q: %w", dataDir, err)
 	}
-	return &armRecorderRecorder{
+
+	rec := &armRecorderRecorder{
 		Named:   rawConf.ResourceName().AsNamed(),
 		logger:  logger,
 		cfg:     conf,
@@ -115,12 +122,31 @@ func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, raw
 		freqHz:  conf.frequencyHz(),
 		dataDir: dataDir,
 		state:   stateIdle,
-	}, nil
+	}
+
+	if conf.Gripper != "" {
+		g, err := gripper.FromProvider(deps, conf.Gripper)
+		if err != nil {
+			return nil, fmt.Errorf("could not get gripper %q: %w", conf.Gripper, err)
+		}
+		rec.gripper = g
+		rec.gripperKey = conf.gripperPositionKey()
+	}
+
+	if conf.MaxVelocityRadsPerSec > 0 || conf.MaxAccelerationRadsPerSec > 0 {
+		rec.moveOpts = &arm.MoveOptions{
+			MaxVelRads: conf.MaxVelocityRadsPerSec,
+			MaxAccRads: conf.MaxAccelerationRadsPerSec,
+		}
+	}
+
+	return rec, nil
 }
 
 func (s *armRecorderRecorder) Readings(ctx context.Context, extra map[string]interface{}) (map[string]interface{}, error) {
 	s.mu.Lock()
 	state, session, frameCount, lastErr := s.state, s.session, len(s.frames), s.lastError
+	hasGripper := s.gripper != nil
 	s.mu.Unlock()
 
 	out := map[string]interface{}{
@@ -139,6 +165,18 @@ func (s *armRecorderRecorder) Readings(ctx context.Context, extra map[string]int
 	}
 	out["joints"] = toInterfaceSlice(joints)
 	out["joint_count"] = len(joints)
+
+	if hasGripper {
+		out["has_gripper"] = true
+		gripPos, err := s.readGripperPosition(ctx)
+		if err != nil {
+			s.logger.Warnf("could not read gripper position: %v", err)
+			out["gripper_error"] = err.Error()
+		} else {
+			out["gripper_position"] = gripPos
+		}
+	}
+
 	return out, nil
 }
 
@@ -156,6 +194,27 @@ func toStringInterfaceSlice(s []string) []interface{} {
 		out[i] = v
 	}
 	return out
+}
+
+func (s *armRecorderRecorder) readGripperPosition(ctx context.Context) (float64, error) {
+	resp, err := s.gripper.DoCommand(ctx, map[string]interface{}{"command": "get_position"})
+	if err != nil {
+		return 0, err
+	}
+	v, ok := resp[s.gripperKey]
+	if !ok {
+		return 0, fmt.Errorf("get_position response missing key %q", s.gripperKey)
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return 0, fmt.Errorf("gripper position %q is not a number (got %T)", s.gripperKey, v)
+	}
+	return f, nil
+}
+
+func (s *armRecorderRecorder) setGripperPosition(ctx context.Context, pos float64) error {
+	_, err := s.gripper.DoCommand(ctx, map[string]interface{}{"command": "set_position", s.gripperKey: pos})
+	return err
 }
 
 func argString(cmd map[string]interface{}, key string) (string, error) {
@@ -219,6 +278,7 @@ func (s *armRecorderRecorder) startRecording(cmd map[string]interface{}) (map[st
 	s.state = stateRecording
 	s.session = session
 	s.frames = nil
+	s.gripperPositions = nil
 	s.lastError = ""
 	s.workerCancel = cancel
 	s.workerDone = done
@@ -250,8 +310,27 @@ func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}
 			}
 			frame := make([]float64, len(joints))
 			copy(frame, joints)
+
+			var gripPos float64
+			if s.gripper != nil {
+				gripPos, err = s.readGripperPosition(ctx)
+				if err != nil {
+					s.logger.Errorf("recording stopped: gripper read failed: %v", err)
+					s.mu.Lock()
+					s.lastError = err.Error()
+					s.state = stateIdle
+					s.workerCancel = nil
+					s.workerDone = nil
+					s.mu.Unlock()
+					return
+				}
+			}
+
 			s.mu.Lock()
 			s.frames = append(s.frames, frame)
+			if s.gripper != nil {
+				s.gripperPositions = append(s.gripperPositions, gripPos)
+			}
 			s.mu.Unlock()
 		}
 	}
@@ -276,10 +355,13 @@ func (s *armRecorderRecorder) stopRecording() (map[string]interface{}, error) {
 		jointCount = len(s.frames[0])
 	}
 	sess := &Session{
-		Name:        s.session,
-		FrequencyHz: s.freqHz,
-		JointCount:  jointCount,
-		Frames:      s.frames,
+		Name:               s.session,
+		FrequencyHz:        s.freqHz,
+		JointCount:         jointCount,
+		Frames:             s.frames,
+		HasGripper:         s.gripper != nil,
+		GripperPositionKey: s.gripperKey,
+		GripperPositions:   s.gripperPositions,
 	}
 	if err := saveSession(s.dataDir, sess); err != nil {
 		return nil, fmt.Errorf("could not save session: %w", err)
