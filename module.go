@@ -336,5 +336,13 @@ func (s *armRecorderRecorder) stopPlayback() (map[string]interface{}, error) {
 }
 
 func (s *armRecorderRecorder) Close(ctx context.Context) error {
+	s.mu.Lock()
+	cancel, done := s.workerCancel, s.workerDone
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+		_ = s.arm.Stop(ctx, nil)
+	}
 	return nil
 }
