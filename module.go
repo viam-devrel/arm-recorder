@@ -299,6 +299,15 @@ func (s *armRecorderRecorder) failRecording(err error) {
 	s.mu.Unlock()
 }
 
+// setLastError records a playback error in lastError so Readings can surface it.
+// It only sets lastError; it does NOT touch state or worker fields — playLoop's
+// deferred cleanup handles those.
+func (s *armRecorderRecorder) setLastError(err error) {
+	s.mu.Lock()
+	s.lastError = err.Error()
+	s.mu.Unlock()
+}
+
 func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	interval := time.Duration(float64(time.Second) / s.freqHz)
@@ -502,10 +511,20 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 
 		wg.Wait()
 
-		if firstErr != nil {
-			if ctx.Err() == nil {
-				s.logger.Errorf("playback aborted during safe entry: %v", firstErr)
+		// Any abort (internal error OR external cancel): defensively halt the arm.
+		if firstErr != nil || ctx.Err() != nil {
+			if stopErr := s.arm.Stop(context.Background(), nil); stopErr != nil {
+				s.logger.Errorf("failed to stop arm after playback abort: %v", stopErr)
 			}
+		}
+		// Genuine internal failure (NOT a user-requested stop) → surface + log + return.
+		if firstErr != nil && ctx.Err() == nil {
+			s.setLastError(firstErr)
+			s.logger.Errorf("playback aborted during safe entry: %v", firstErr)
+			return
+		}
+		// External stop/cancel → clean return, no error surfaced.
+		if ctx.Err() != nil {
 			return
 		}
 	}
@@ -541,6 +560,9 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 	}
 
 	// Arm goroutine: one call that blends through all remaining waypoints.
+	// NOTE: this assumes the arm driver honors context cancellation to return from
+	// the blocking MoveThroughJointPositions call; if it doesn't, stopPlayback/Close
+	// would block on <-done.
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
@@ -581,16 +603,20 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 
 	wg2.Wait()
 
-	// If the outer context was canceled, stop the arm.
-	if ctx.Err() != nil {
-		if err := s.arm.Stop(context.Background(), nil); err != nil {
-			s.logger.Errorf("arm.Stop after cancel failed: %v", err)
+	// Any abort (internal error OR external cancel): defensively halt the arm.
+	if firstErr != nil || ctx.Err() != nil {
+		if stopErr := s.arm.Stop(context.Background(), nil); stopErr != nil {
+			s.logger.Errorf("failed to stop arm after playback abort: %v", stopErr)
 		}
+	}
+	// Genuine internal failure (NOT a user-requested stop) → surface + log + return.
+	if firstErr != nil && ctx.Err() == nil {
+		s.setLastError(firstErr)
+		s.logger.Errorf("playback aborted during main motion: %v", firstErr)
 		return
 	}
-
-	if firstErr != nil {
-		s.logger.Errorf("playback aborted during main motion: %v", firstErr)
+	// External stop/cancel → clean return, no error surfaced.
+	if ctx.Err() != nil {
 		return
 	}
 
