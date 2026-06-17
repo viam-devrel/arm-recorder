@@ -33,8 +33,12 @@ func init() {
 }
 
 type Config struct {
-	Arm         string  `json:"arm"`
-	FrequencyHz float64 `json:"frequency_hz"`
+	Arm                       string  `json:"arm"`
+	FrequencyHz               float64 `json:"frequency_hz"`
+	Gripper                   string  `json:"gripper,omitempty"`
+	GripperPositionKey        string  `json:"gripper_position_key,omitempty"`
+	MaxVelocityRadsPerSec     float64 `json:"max_velocity_rads_per_sec,omitempty"`
+	MaxAccelerationRadsPerSec float64 `json:"max_acceleration_rads_per_sec,omitempty"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -44,7 +48,17 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.FrequencyHz < 0 {
 		return nil, nil, fmt.Errorf("%s: frequency_hz must not be negative", path)
 	}
-	return []string{cfg.Arm}, nil, nil
+	if cfg.MaxVelocityRadsPerSec < 0 {
+		return nil, nil, fmt.Errorf("%s: max_velocity_rads_per_sec must not be negative", path)
+	}
+	if cfg.MaxAccelerationRadsPerSec < 0 {
+		return nil, nil, fmt.Errorf("%s: max_acceleration_rads_per_sec must not be negative", path)
+	}
+	deps := []string{cfg.Arm}
+	if cfg.Gripper != "" {
+		deps = append(deps, cfg.Gripper)
+	}
+	return deps, nil, nil
 }
 
 func (cfg *Config) frequencyHz() float64 {
@@ -52,6 +66,13 @@ func (cfg *Config) frequencyHz() float64 {
 		return defaultFrequencyHz
 	}
 	return cfg.FrequencyHz
+}
+
+func (cfg *Config) gripperPositionKey() string {
+	if cfg.GripperPositionKey == "" {
+		return "position"
+	}
+	return cfg.GripperPositionKey
 }
 
 type armRecorderRecorder struct {

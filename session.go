@@ -11,11 +11,14 @@ import (
 
 // Session is the on-disk representation of a recording.
 type Session struct {
-	Name        string      `json:"session"`
-	FrequencyHz float64     `json:"frequency_hz"`
-	RecordedAt  string      `json:"recorded_at"`
-	JointCount  int         `json:"joint_count"`
-	Frames      [][]float64 `json:"frames"`
+	Name               string      `json:"session"`
+	FrequencyHz        float64     `json:"frequency_hz"`
+	RecordedAt         string      `json:"recorded_at"`
+	JointCount         int         `json:"joint_count"`
+	Frames             [][]float64 `json:"frames"`
+	HasGripper         bool        `json:"has_gripper,omitempty"`
+	GripperPositionKey string      `json:"gripper_position_key,omitempty"`
+	GripperPositions   []float64   `json:"gripper_positions,omitempty"`
 }
 
 const sessionExt = ".json"
