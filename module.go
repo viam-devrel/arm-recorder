@@ -3,6 +3,7 @@ package armrecorder
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -69,6 +70,7 @@ type armRecorderRecorder struct {
 	frames       [][]float64
 	workerCancel context.CancelFunc
 	workerDone   chan struct{}
+	lastError    string
 }
 
 func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (sensor.Sensor, error) {
@@ -97,13 +99,16 @@ func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, raw
 
 func (s *armRecorderRecorder) Readings(ctx context.Context, extra map[string]interface{}) (map[string]interface{}, error) {
 	s.mu.Lock()
-	state, session, frameCount := s.state, s.session, len(s.frames)
+	state, session, frameCount, lastErr := s.state, s.session, len(s.frames), s.lastError
 	s.mu.Unlock()
 
 	out := map[string]interface{}{
 		"state":       state,
 		"session":     session,
 		"frame_count": frameCount,
+	}
+	if lastErr != "" {
+		out["last_error"] = lastErr
 	}
 	joints, err := s.arm.JointPositions(ctx, nil)
 	if err != nil {
@@ -177,6 +182,7 @@ func (s *armRecorderRecorder) startRecording(cmd map[string]interface{}) (map[st
 	s.state = stateRecording
 	s.session = session
 	s.frames = nil
+	s.lastError = ""
 	s.workerCancel = cancel
 	s.workerDone = done
 	go s.recordLoop(wctx, done)
@@ -197,6 +203,12 @@ func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}
 			joints, err := s.arm.JointPositions(ctx, nil)
 			if err != nil {
 				s.logger.Errorf("recording stopped: joint read failed: %v", err)
+				s.mu.Lock()
+				s.lastError = err.Error()
+				s.state = stateIdle
+				s.workerCancel = nil
+				s.workerDone = nil
+				s.mu.Unlock()
 				return
 			}
 			frame := make([]float64, len(joints))
@@ -257,13 +269,26 @@ func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]inter
 		return nil, fmt.Errorf("session %q has no frames", session)
 	}
 
+	// Guard against a bad FrequencyHz from the on-disk file.
+	if sess.FrequencyHz <= 0 || math.IsNaN(sess.FrequencyHz) || math.IsInf(sess.FrequencyHz, 0) {
+		s.logger.Warnf("session %q has invalid frequency_hz %v; using default %.2f Hz", session, sess.FrequencyHz, defaultFrequencyHz)
+		sess.FrequencyHz = defaultFrequencyHz
+	}
+
 	// Validate joint count against the live arm before moving anything.
 	current, err := s.arm.JointPositions(context.Background(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not read arm joints: %w", err)
 	}
-	if len(current) != len(sess.Frames[0]) {
-		return nil, fmt.Errorf("joint count mismatch: arm has %d, session has %d", len(current), len(sess.Frames[0]))
+	armJointCount := len(current)
+	if armJointCount != len(sess.Frames[0]) {
+		return nil, fmt.Errorf("joint count mismatch: arm has %d, session has %d", armJointCount, len(sess.Frames[0]))
+	}
+	// Validate every frame has the expected joint count.
+	for i, frame := range sess.Frames {
+		if len(frame) != armJointCount {
+			return nil, fmt.Errorf("frame %d has %d joints, expected %d", i, len(frame), armJointCount)
+		}
 	}
 
 	s.mu.Lock()
@@ -271,6 +296,7 @@ func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]inter
 	if s.state != stateIdle {
 		return nil, fmt.Errorf("cannot play while %s", s.state)
 	}
+	s.lastError = ""
 	wctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s.state = statePlaying
