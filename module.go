@@ -142,6 +142,21 @@ func (s *armRecorderRecorder) DoCommand(ctx context.Context, cmd map[string]inte
 		return s.play(cmd)
 	case "stop_playback":
 		return s.stopPlayback()
+	case "list_sessions":
+		names, err := listSessions(s.dataDir)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"sessions": names}, nil
+	case "delete_session":
+		session, err := argString(cmd, "session")
+		if err != nil {
+			return nil, err
+		}
+		if err := deleteSession(s.dataDir, session); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"status": "deleted", "session": session}, nil
 	default:
 		return nil, fmt.Errorf("unknown command %q", command)
 	}
