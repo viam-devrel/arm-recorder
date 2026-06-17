@@ -1,11 +1,10 @@
 package main
 
 import (
-	"context"
 	"armrecorder"
+	"context"
+	"fmt"
 	"go.viam.com/rdk/logging"
-	"go.viam.com/rdk/resource"
-	sensor "go.viam.com/rdk/components/sensor"
 )
 
 func main() {
@@ -18,17 +17,9 @@ func main() {
 func realMain() error {
 	ctx := context.Background()
 	logger := logging.NewLogger("cli")
-
-	deps := resource.Dependencies{}
-	// can load these from a remote machine if you need
-
-	cfg := armrecorder.Config{}
-
-	thing, err := armrecorder.NewRecorder(ctx, deps, sensor.Named("foo"), &cfg, logger)
-	if err != nil {
-		return err
-	}
-	defer thing.Close(ctx)
-
+	_ = ctx
+	_ = logger
+	_ = armrecorder.Recorder
+	fmt.Println("arm-recorder cli stub")
 	return nil
 }
