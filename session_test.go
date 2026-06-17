@@ -1,7 +1,6 @@
 package armrecorder
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -59,5 +58,4 @@ func TestSessionNameSanitized(t *testing.T) {
 	if _, err := loadSession(dir, "../../etc/passwd"); err == nil {
 		t.Fatal("expected error for unsafe session name")
 	}
-	_ = filepath.Separator
 }

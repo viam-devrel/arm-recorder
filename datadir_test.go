@@ -1,7 +1,6 @@
 package armrecorder
 
 import (
-	"os"
 	"testing"
 
 	"go.viam.com/rdk/logging"
@@ -18,7 +17,6 @@ func TestResolveDataDirFromEnv(t *testing.T) {
 
 func TestResolveDataDirFallback(t *testing.T) {
 	t.Setenv("VIAM_MODULE_DATA", "")
-	os.Unsetenv("VIAM_MODULE_DATA")
 	got := resolveDataDir(logging.NewTestLogger(t))
 	if got == "" {
 		t.Fatal("expected a non-empty fallback dir")
