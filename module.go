@@ -138,6 +138,10 @@ func (s *armRecorderRecorder) DoCommand(ctx context.Context, cmd map[string]inte
 		return s.startRecording(cmd)
 	case "stop_recording":
 		return s.stopRecording()
+	case "play":
+		return s.play(cmd)
+	case "stop_playback":
+		return s.stopPlayback()
 	default:
 		return nil, fmt.Errorf("unknown command %q", command)
 	}
@@ -223,6 +227,97 @@ func (s *armRecorderRecorder) stopRecording() (map[string]interface{}, error) {
 	s.workerDone = nil
 	s.logger.Infof("saved session %q with %d frames", name, count)
 	return map[string]interface{}{"status": "saved", "session": name, "frame_count": count}, nil
+}
+
+func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]interface{}, error) {
+	session, err := argString(cmd, "session")
+	if err != nil {
+		return nil, err
+	}
+	sess, err := loadSession(s.dataDir, session)
+	if err != nil {
+		return nil, err
+	}
+	if len(sess.Frames) == 0 {
+		return nil, fmt.Errorf("session %q has no frames", session)
+	}
+
+	// Validate joint count against the live arm before moving anything.
+	current, err := s.arm.JointPositions(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not read arm joints: %w", err)
+	}
+	if len(current) != len(sess.Frames[0]) {
+		return nil, fmt.Errorf("joint count mismatch: arm has %d, session has %d", len(current), len(sess.Frames[0]))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != stateIdle {
+		return nil, fmt.Errorf("cannot play while %s", s.state)
+	}
+	wctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.state = statePlaying
+	s.session = session
+	s.workerCancel = cancel
+	s.workerDone = done
+	go s.playLoop(wctx, done, sess)
+	s.logger.Infof("started playback of session %q (%d frames)", session, len(sess.Frames))
+	return map[string]interface{}{"status": "playing", "session": session, "frame_count": len(sess.Frames)}, nil
+}
+
+func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, sess *Session) {
+	defer close(done)
+	defer func() {
+		s.mu.Lock()
+		s.state = stateIdle
+		s.workerCancel = nil
+		s.workerDone = nil
+		s.mu.Unlock()
+	}()
+
+	// Safe entry: move to the first frame and block until reached.
+	if err := s.arm.MoveToJointPositions(ctx, sess.Frames[0], nil); err != nil {
+		if ctx.Err() == nil {
+			s.logger.Errorf("playback aborted moving to first frame: %v", err)
+		}
+		return
+	}
+
+	interval := time.Duration(float64(time.Second) / sess.FrequencyHz)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for i := 1; i < len(sess.Frames); i++ {
+		select {
+		case <-ctx.Done():
+			_ = s.arm.Stop(context.Background(), nil)
+			return
+		case <-ticker.C:
+			if err := s.arm.MoveToJointPositions(ctx, sess.Frames[i], nil); err != nil {
+				if ctx.Err() == nil {
+					s.logger.Errorf("playback aborted at frame %d: %v", i, err)
+				}
+				return
+			}
+		}
+	}
+	s.logger.Infof("playback of session %q complete", sess.Name)
+}
+
+func (s *armRecorderRecorder) stopPlayback() (map[string]interface{}, error) {
+	s.mu.Lock()
+	if s.state != statePlaying {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("not playing (state is %s)", s.state)
+	}
+	cancel, done := s.workerCancel, s.workerDone
+	s.mu.Unlock()
+
+	cancel()
+	<-done
+	_ = s.arm.Stop(context.Background(), nil)
+	return map[string]interface{}{"status": "stopped"}, nil
 }
 
 func (s *armRecorderRecorder) Close(ctx context.Context) error {
