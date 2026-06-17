@@ -982,3 +982,141 @@ git commit -am "fix: <issue found during hardware testing>"
 - **Frequency interval:** `time.Duration(float64(time.Second)/freqHz)` — guard against `freqHz <= 0` is already handled by `Config.frequencyHz()`.
 - **`[]referenceframe.Input` ≡ `[]float64`:** you can pass `sess.Frames[i]` directly to `MoveToJointPositions` and assign `arm.JointPositions(...)` results directly into `[]float64` frames; no conversion helpers needed.
 - **Run the full suite before each commit:** `go test ./...`.
+
+---
+
+# Addendum tasks (2026-06-17): proto fix, gripper tracking, smooth playback
+
+Verified API facts (RDK v0.131.0):
+- Sensor `Readings` / `DoCommand` maps are serialized as protobuf `Struct`. Typed slices are rejected: `structpb.NewStruct({"x": []float64{...}})` → `proto: invalid type: []float64`; `[]string` fails the same way; `[]interface{}` is accepted. (Confirmed by probe.)
+- `arm.MoveThroughJointPositions(ctx, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]any) error` — blends through waypoints in one blocking call. `arm.MoveOptions{ MaxVelRads, MaxAccRads float64; ... }`. Pass `nil` for driver defaults.
+- `gripper.FromProvider(deps, name) (gripper.Gripper, error)`; `gripper.Gripper` embeds `resource.Resource`, so `gripper.DoCommand(ctx, map)` is available.
+
+### Task 12: Fix proto-unsafe Readings/list_sessions (TDD)
+
+**Files:** Modify `module.go`; create/extend `proto_test.go`.
+
+**Step 1: Failing test** — add `proto_test.go`:
+
+```go
+package armrecorder
+
+import (
+	"testing"
+
+	"google.golang.org/protobuf/types/known/structpb"
+)
+
+func TestReadingsMapIsProtoSafe(t *testing.T) {
+	// joints must be []interface{}, not []float64
+	if _, err := structpb.NewStruct(map[string]interface{}{
+		"joints": toInterfaceSlice([]float64{0.1, -0.2, 0.3}),
+	}); err != nil {
+		t.Fatalf("joints not proto-encodable: %v", err)
+	}
+}
+
+func TestSessionsListIsProtoSafe(t *testing.T) {
+	if _, err := structpb.NewStruct(map[string]interface{}{
+		"sessions": toStringInterfaceSlice([]string{"a", "b"}),
+	}); err != nil {
+		t.Fatalf("sessions not proto-encodable: %v", err)
+	}
+}
+```
+
+**Step 2:** Run `go test ./... -run Proto -v` → FAIL (undefined helpers).
+
+**Step 3: Implement** in `module.go`:
+
+```go
+func toInterfaceSlice(f []float64) []interface{} {
+	out := make([]interface{}, len(f))
+	for i, v := range f {
+		out[i] = v
+	}
+	return out
+}
+
+func toStringInterfaceSlice(s []string) []interface{} {
+	out := make([]interface{}, len(s))
+	for i, v := range s {
+		out[i] = v
+	}
+	return out
+}
+```
+
+Then in `Readings`, set `out["joints"] = toInterfaceSlice(joints)` (joints is `[]float64`). In the `list_sessions` handler, return `map[string]interface{}{"sessions": toStringInterfaceSlice(names)}`.
+
+**Step 4:** Run `go test ./...` → PASS. Also worth a manual note: this is the fix for the reported `[unknown] proto: invalid type: []float64`.
+
+**Step 5: Commit** — `fix: make Readings/list_sessions responses proto-encodable`.
+
+### Task 13: Gripper config + validation + session fields (TDD)
+
+**Files:** Modify `module.go`, `session.go`; extend `config_test.go`, `session_test.go`.
+
+- Add to `Config`: `Gripper string json:"gripper,omitempty"`, `GripperPositionKey string json:"gripper_position_key,omitempty"`, `MaxVelocityRadsPerSec float64 json:"max_velocity_rads_per_sec,omitempty"`, `MaxAccelerationRadsPerSec float64 json:"max_acceleration_rads_per_sec,omitempty"`.
+- `Validate`: when `cfg.Gripper != ""`, append it to the required-deps slice. Reject negative vel/accel.
+- Add `func (cfg *Config) gripperPositionKey() string` returning `"position"` when empty.
+- Add to `Session`: `HasGripper bool json:"has_gripper,omitempty"`, `GripperPositionKey string json:"gripper_position_key,omitempty"`, `GripperPositions []float64 json:"gripper_positions,omitempty"`.
+
+**Tests:** extend `config_test.go` (gripper added to required deps when set; absent when unset; default key) and `session_test.go` (round-trip preserves gripper fields; a file with no gripper fields loads with `HasGripper=false`). TDD: write tests first, see them fail, implement, pass. **Commit** — `feat: gripper config, validation, and session fields`.
+
+### Task 14: Gripper-aware recording + Readings
+
+**Files:** Modify `module.go`.
+
+- Constructor: when `conf.Gripper != ""`, resolve `gripper.FromProvider(deps, conf.Gripper)` and store `s.gripper` + `s.gripperKey = conf.gripperPositionKey()`. Build/store `s.moveOpts *arm.MoveOptions` (nil unless a vel/accel is set). Add struct fields: `gripper gripper.Gripper`, `gripperKey string`, `gripperPositions []float64`, `moveOpts *arm.MoveOptions`.
+- Helpers:
+  ```go
+  func (s *armRecorderRecorder) readGripperPosition(ctx context.Context) (float64, error) {
+  	resp, err := s.gripper.DoCommand(ctx, map[string]interface{}{"command": "get_position"})
+  	if err != nil {
+  		return 0, err
+  	}
+  	v, ok := resp[s.gripperKey]
+  	if !ok {
+  		return 0, fmt.Errorf("get_position response missing key %q", s.gripperKey)
+  	}
+  	f, ok := v.(float64)
+  	if !ok {
+  		return 0, fmt.Errorf("gripper position %q is not a number (got %T)", s.gripperKey, v)
+  	}
+  	return f, nil
+  }
+  func (s *armRecorderRecorder) setGripperPosition(ctx context.Context, pos float64) error {
+  	_, err := s.gripper.DoCommand(ctx, map[string]interface{}{"command": "set_position", s.gripperKey: pos})
+  	return err
+  }
+  ```
+- `recordLoop`: each tick read joints (outside lock); if `s.gripper != nil` read gripper position (outside lock); on either error set `lastError`, reset to idle, return. Then under one lock hold, append the joint frame to `s.frames` AND (if gripper) the position to `s.gripperPositions`. Reset `s.gripperPositions = nil` in `startRecording` alongside `s.frames = nil`.
+- `stopRecording`: when saving, set `sess.HasGripper = s.gripper != nil`, `sess.GripperPositionKey = s.gripperKey`, `sess.GripperPositions = s.gripperPositions`.
+- `Readings`: convert joints via `toInterfaceSlice`; if `s.gripper != nil` add `out["has_gripper"] = true` and a live `gripper_position` read — on error set `out["gripper_error"]` instead (do the read outside the lock, like joints).
+
+Verify `go build ./... && go vet ./... && go test ./...` clean. **Commit** — `feat: record and report gripper position alongside joints`.
+
+### Task 15: Smooth, gripper-synced playback (MoveThrough + parallel track)
+
+**Files:** Modify `module.go`.
+
+- `play` validation (before launching the worker): keep the existing all-frames joint-count check; then:
+  - if `sess.HasGripper && s.gripper == nil` → return error.
+  - if `sess.HasGripper && len(sess.GripperPositions) != len(sess.Frames)` → return error.
+  - if `!sess.HasGripper && s.gripper != nil` → log a notice that the session has no gripper data; play arm only.
+  - Determine `useGripper := sess.HasGripper && s.gripper != nil`.
+- Rewrite `playLoop` to:
+  1. **Safe entry (concurrent):** move arm to `sess.Frames[0]` via `MoveToJointPositions` and, if `useGripper`, `setGripperPosition(ctx, sess.GripperPositions[0])` — run them concurrently (one in a goroutine), wait for both, abort on either error or ctx cancel.
+  2. If more than one frame: **concurrently** run
+     - arm: `s.arm.MoveThroughJointPositions(ctx, sess.Frames[1:], s.moveOpts, nil)` (one call), and
+     - gripper (if `useGripper`): a ticker at `time.Duration(float64(time.Second)/sess.FrequencyHz)` stepping `setGripperPosition` through `sess.GripperPositions[1:]`, stopping when exhausted or ctx done.
+     Wait for both to finish; if either errors, cancel the shared context so the other unwinds; on ctx cancel call `arm.Stop`.
+  3. Deferred cleanup resets state to idle and clears worker fields (as today). Keep the `sess.FrequencyHz` validity guard (`<=0`/NaN/Inf → defaultFrequencyHz) from the earlier fix — the gripper ticker depends on it.
+- Use a `sync.WaitGroup` + a shared cancelable sub-context (`context.WithCancel(ctx)`); capture the first error. Never hold `s.mu` across any arm/gripper call.
+
+Verify `go build ./... && go vet ./... && gofmt -l . && go test ./... -race` clean (the `-race` run matters for the new concurrent track). **Commit** — `feat: smooth playback via MoveThroughJointPositions with synced gripper track`.
+
+### Task 16: Docs update
+
+Update `README.md`: new optional config attributes (`gripper`, `gripper_position_key`, `max_velocity_rads_per_sec`, `max_acceleration_rads_per_sec`); the gripper `get_position`/`set_position` DoCommand contract; new Readings keys (`has_gripper`, `gripper_position`, `gripper_error`); the smooth-playback behavior note (arm motion governed by MoveOptions, gripper track is best-effort wall-clock aligned); and the session-file gripper fields. **Commit** — `docs: gripper tracking and smooth playback`.

@@ -106,3 +106,89 @@ Doubles as something to watch in the app and to feed Viam data capture.
 The exact arm Go signatures (`JointPositions` / `MoveToJointPositions` — these
 moved toward `[]referenceframe.Input` in recent RDK) will be pinned down against
 the actual RDK version after `go mod tidy`, rather than guessed during design.
+
+---
+
+# Addendum (2026-06-17): gripper tracking + playback smoothing + proto fix
+
+## Bug fixes (existing behavior)
+
+- **Readings proto error.** Sensor `Readings` and `DoCommand` responses are
+  serialized as a protobuf `Struct`, which rejects typed slices — confirmed:
+  `structpb.NewStruct({"joints": []float64{...}})` → `proto: invalid type:
+  []float64` (the reported error), and `[]string` fails identically while
+  `[]interface{}` is accepted. Fix: convert `joints` (and the `list_sessions`
+  `sessions` `[]string`) to `[]interface{}` before returning. Add a helper and a
+  regression test that `structpb.NewStruct` succeeds on the produced maps.
+
+- **Jerky playback.** Replace per-frame `MoveToJointPositions` calls with a
+  single `MoveThroughJointPositions(ctx, [][]Input, *MoveOptions, extra)` so the
+  arm driver blends through the waypoints instead of decelerating to zero at
+  each frame.
+
+## Gripper tracking (additive, optional)
+
+### Config (new optional fields)
+
+```go
+Gripper            string  `json:"gripper,omitempty"`
+GripperPositionKey string  `json:"gripper_position_key,omitempty"` // default "position"
+// playback velocity/accel profile for MoveThroughJointPositions (optional)
+MaxVelocityRadsPerSec     float64 `json:"max_velocity_rads_per_sec,omitempty"`
+MaxAccelerationRadsPerSec float64 `json:"max_acceleration_rads_per_sec,omitempty"`
+```
+
+`Validate` adds the gripper to **required** deps only when `gripper != ""`.
+Existing arm-only configs are unaffected.
+
+### Position contract (configurable key, fixed verbs)
+
+- Read: `gripper.DoCommand({"command":"get_position"})`; extract the value at
+  `GripperPositionKey`, assert `float64`. Missing key / non-number → clear error.
+- Write: `gripper.DoCommand({"command":"set_position", <key>: value})`.
+- Dependency resolved via `gripper.FromProvider(deps, name)`; `gripper.Gripper`
+  embeds `resource.Resource`, providing `DoCommand`.
+
+### File format (additive, parallel arrays)
+
+```json
+{
+  "has_gripper": true,
+  "gripper_position_key": "position",
+  "gripper_positions": [0.42, 0.43]
+}
+```
+
+`gripper_positions[i]` pairs with `frames[i]`. Old files (fields absent) load
+with `has_gripper=false`.
+
+### Recording
+
+Each tick: read joints; if a gripper is configured, also read its position. Both
+appended under the same lock hold so the arrays stay index-aligned. A gripper
+read error aborts recording exactly like a joint read error (`last_error`, reset
+to idle).
+
+### Playback engine: MoveThrough + parallel gripper track (chosen)
+
+1. Up-front validation: every frame length == live arm joint count; if
+   `has_gripper` and no gripper configured → hard error; if `has_gripper`,
+   `len(gripper_positions) == len(frames)`; if gripper configured but session has
+   none → play arm only and log a notice.
+2. Safe entry: concurrently `MoveToJointPositions(frames[0])` and (if gripper)
+   `set_position(gripper_positions[0])`, block until both done.
+3. Then concurrently: `MoveThroughJointPositions(frames[1:], moveOpts)` for the
+   arm (one blended motion) AND a gripper goroutine stepping
+   `set_position(gripper_positions[1:])` on a ticker at record Hz. Wait for both.
+   `moveOpts` built from the optional vel/accel config; `nil` when unset (driver
+   defaults).
+4. Arm duration is governed by `MoveOptions`, not record Hz, so gripper sync is
+   best-effort wall-clock alignment (accepted for the POC). Context cancel aborts
+   both and calls `arm.Stop`.
+
+### Readings
+
+Adds `gripper_position` (live read when configured) and `has_gripper`; a failed
+live read surfaces `gripper_error` (mirrors `joints_error`). `joints` is now
+emitted as `[]interface{}`.
+
