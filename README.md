@@ -34,7 +34,7 @@ Add the component to your machine's config and list the arm it should control as
 |---|---|---|
 | `state` | yes | One of `"idle"`, `"recording"`, or `"playing"` |
 | `session` | yes | Name of the active or most-recently-used session (empty string when idle with no prior session) |
-| `frame_count` | yes | Number of frames buffered in memory (non-zero only while recording) |
+| `frame_count` | yes | Number of frames currently buffered in memory. Grows while recording; retains the last recorded count after `stop_recording` until the next `start_recording` clears the buffer |
 | `joints` | when arm is reachable | Current joint positions as a list of float64 values (radians or degrees depending on the arm) |
 | `joint_count` | when arm is reachable | Number of joints reported by the arm |
 | `last_error` | when a background error occurred | Last error message from a failed joint read or playback move |
