@@ -3,6 +3,7 @@ package armrecorder
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
@@ -13,6 +14,8 @@ var (
 	Recorder         = resource.NewModel("devrel", "arm-recorder", "recorder")
 	errUnimplemented = errors.New("unimplemented")
 )
+
+const defaultFrequencyHz = 10.0
 
 func init() {
 	resource.RegisterComponent(sensor.API, Recorder,
@@ -28,7 +31,20 @@ type Config struct {
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
-	return nil, nil, nil
+	if cfg.Arm == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
+	}
+	if cfg.FrequencyHz < 0 {
+		return nil, nil, fmt.Errorf("%s: frequency_hz must not be negative", path)
+	}
+	return []string{cfg.Arm}, nil, nil
+}
+
+func (cfg *Config) frequencyHz() float64 {
+	if cfg.FrequencyHz <= 0 {
+		return defaultFrequencyHz
+	}
+	return cfg.FrequencyHz
 }
 
 type armRecorderRecorder struct {
