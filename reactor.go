@@ -8,6 +8,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/vision/objectdetection"
 )
 
 // Reactor plays a recorded session when a detector vision service reports a
@@ -106,4 +107,23 @@ func (r *reactor) DoCommand(ctx context.Context, cmd map[string]interface{}) (ma
 
 func (r *reactor) Close(ctx context.Context) error {
 	return nil
+}
+
+// selectSession returns the session for the highest-confidence detection that
+// clears minConfidence and whose label exists in labelSessions.
+func selectSession(dets []objectdetection.Detection, labelSessions map[string]string, minConfidence float64) (string, string, bool) {
+	bestLabel, bestSession, bestScore := "", "", -1.0
+	for _, d := range dets {
+		if d.Score() < minConfidence {
+			continue
+		}
+		session, ok := labelSessions[d.Label()]
+		if !ok {
+			continue
+		}
+		if d.Score() > bestScore {
+			bestScore, bestLabel, bestSession = d.Score(), d.Label(), session
+		}
+	}
+	return bestLabel, bestSession, bestScore >= 0
 }
