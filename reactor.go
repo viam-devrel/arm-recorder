@@ -110,6 +110,7 @@ type reactor struct {
 	lastLabel    string
 	lastSession  string
 	lastPlayedAt time.Time
+	lastError    string
 }
 
 func newReactor(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -166,6 +167,7 @@ func (r *reactor) startReacting() (map[string]interface{}, error) {
 	r.reacting = true
 	r.cancel = cancel
 	r.done = done
+	r.lastError = ""
 	go r.reactLoop(wctx, done)
 	r.logger.Infof("started reacting (poll %v, cooldown %v, min_confidence %.2f)", r.pollInterval, r.cooldown, r.minConf)
 	return map[string]interface{}{"status": "reacting"}, nil
@@ -211,6 +213,9 @@ func (r *reactor) tick(ctx context.Context) {
 	if err != nil {
 		if ctx.Err() == nil {
 			r.logger.Warnf("detection failed: %v", err)
+			r.mu.Lock()
+			r.lastError = err.Error()
+			r.mu.Unlock()
 		}
 		return
 	}
@@ -224,10 +229,16 @@ func (r *reactor) tick(ctx context.Context) {
 	if !cooldownElapsed {
 		return
 	}
+	// play is asynchronous: the recorder's playback worker runs on its own
+	// context, not the reactor loop's. Cancelling the loop does NOT stop arm
+	// motion — stopReacting issues stop_playback to actually halt the arm.
 	if _, err := r.recorder.DoCommand(ctx, map[string]interface{}{"command": "play", "session": session}); err != nil {
 		// Recorder busy or play error: skip without stamping cooldown; retry next tick.
 		if ctx.Err() == nil {
 			r.logger.Infof("skipped play of %q (label %q): %v", session, label, err)
+			r.mu.Lock()
+			r.lastError = err.Error()
+			r.mu.Unlock()
 		}
 		return
 	}
@@ -252,6 +263,9 @@ func (r *reactor) status() map[string]interface{} {
 			remaining = 0
 		}
 		out["cooldown_remaining_sec"] = remaining.Seconds()
+	}
+	if r.lastError != "" {
+		out["last_error"] = r.lastError
 	}
 	return out
 }
