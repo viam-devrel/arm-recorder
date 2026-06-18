@@ -6,6 +6,8 @@
 
 See the [recorder documentation](./devrel_arm-recorder_recorder.md) for information about that resource.
 
+See the [reactor documentation](./devrel_arm-recorder_reactor.md) for information about the `devrel:arm-recorder:reactor` generic service, which polls a detector vision service and autonomously triggers the recorder to play a matching session when a configured label is detected.
+
 ## Behavior and caveats
 
 - **Single activity at a time.** Only one operation (recording or playback) runs at a time. Attempting to start a second while one is active returns an error.
