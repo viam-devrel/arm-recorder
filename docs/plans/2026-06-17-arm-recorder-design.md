@@ -192,3 +192,46 @@ Adds `gripper_position` (live read when configured) and `has_gripper`; a failed
 live read surfaces `gripper_error` (mirrors `joints_error`). `joints` is now
 emitted as `[]interface{}`.
 
+---
+
+# Addendum (2026-06-17): playback interpolation for path fidelity
+
+## Problem
+
+`MoveThroughJointPositions` blends through waypoints (that is what makes it
+smooth) but, with sparse 10 Hz capture, it corner-cuts and visibly skips past
+recorded positions. `arm.MoveOptions` has no blend-radius/path-tolerance knob —
+only velocity/acceleration — so the lever is **waypoint density**: denser
+waypoints shrink each blend corner so the executed path hugs the recording.
+
+## Approach (chosen): interpolate at playback
+
+- **New optional config** `playback_interpolation_steps` — number of
+  linearly-interpolated waypoints inserted between each consecutive recorded
+  frame. **Default 10**; **explicit `0` disables** interpolation (today's
+  behavior). Because Go's zero value can't distinguish "omitted" from
+  "explicitly 0", the field is a **pointer** (`*int`): `nil` → default 10,
+  non-nil → use the value. Negative values rejected in `Validate`.
+- **Pure helper** `interpolateFrames(frames [][]float64, steps int) [][]float64`:
+  `steps <= 0` (or < 2 frames) returns input unchanged; otherwise for each pair
+  `(frames[i], frames[i+1])` emit `frames[i]` + `steps` evenly-spaced
+  interpolated points, then append the final frame. Length
+  `(len-1)*(steps+1)+1`. Unit-tested (endpoints preserved, midpoint at steps=1,
+  length formula, multi-joint).
+- **playLoop main motion:** `dense := interpolateFrames(sess.Frames, interpSteps)`
+  and pass `dense[1:]` to `MoveThroughJointPositions` (frame[0] already reached by
+  the safe-entry move). With interpolation off, `dense == sess.Frames` and
+  behavior is byte-for-byte the old path.
+- **Unchanged:** safe-entry move; the gripper track (still steps the original
+  `gripper_positions` at record Hz — interpolation is arm-path-only, so gripper
+  sync stays best-effort as already documented).
+
+## Why faithful, and why it doesn't slow playback
+
+Linear joint-space interpolation makes the blended path converge to the
+piecewise-linear path through the recorded samples — the closest reconstruction
+the samples allow. Adding waypoints does **not** change total duration: the
+driver time-parameterizes by the `MoveOptions` velocity/accel profile, so more
+points only improves path tracking, not speed.
+
+

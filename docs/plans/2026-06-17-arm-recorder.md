@@ -1120,3 +1120,115 @@ Verify `go build ./... && go vet ./... && gofmt -l . && go test ./... -race` cle
 ### Task 16: Docs update
 
 Update `README.md`: new optional config attributes (`gripper`, `gripper_position_key`, `max_velocity_rads_per_sec`, `max_acceleration_rads_per_sec`); the gripper `get_position`/`set_position` DoCommand contract; new Readings keys (`has_gripper`, `gripper_position`, `gripper_error`); the smooth-playback behavior note (arm motion governed by MoveOptions, gripper track is best-effort wall-clock aligned); and the session-file gripper fields. **Commit** — `docs: gripper tracking and smooth playback`.
+
+---
+
+# Addendum task (2026-06-17): playback interpolation
+
+### Task 17: Interpolate playback waypoints for path fidelity (TDD)
+
+**Files:** Modify `module.go`; create `interpolate_test.go`; update `README.md`.
+
+**Why:** `MoveThroughJointPositions` blends through waypoints and corner-cuts (skips past) sparse recorded frames. `arm.MoveOptions` has no blend-tolerance knob, so denser waypoints are the lever. Insert linearly-interpolated waypoints between recorded frames before the blended move.
+
+**Step 1: Failing test** — create `interpolate_test.go`:
+
+```go
+package armrecorder
+
+import "testing"
+
+func TestInterpolateFramesOff(t *testing.T) {
+	in := [][]float64{{0, 0}, {1, 1}}
+	out := interpolateFrames(in, 0)
+	if len(out) != 2 {
+		t.Fatalf("steps=0 should be unchanged, got len %d", len(out))
+	}
+}
+
+func TestInterpolateFramesMidpoint(t *testing.T) {
+	out := interpolateFrames([][]float64{{0, 0}, {1, 1}}, 1)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 frames, got %d", len(out))
+	}
+	if out[1][0] != 0.5 || out[1][1] != 0.5 {
+		t.Fatalf("expected midpoint [0.5 0.5], got %v", out[1])
+	}
+	// endpoints preserved
+	if out[0][0] != 0 || out[2][0] != 1 {
+		t.Fatalf("endpoints not preserved: %v / %v", out[0], out[2])
+	}
+}
+
+func TestInterpolateFramesLength(t *testing.T) {
+	// 3 frames, steps=3 -> (3-1)*(3+1)+1 = 9
+	out := interpolateFrames([][]float64{{0}, {1}, {2}}, 3)
+	if len(out) != 9 {
+		t.Fatalf("expected 9 frames, got %d", len(out))
+	}
+}
+
+func TestInterpolationStepsDefault(t *testing.T) {
+	if (&Config{}).interpolationSteps() != defaultInterpolationSteps {
+		t.Fatalf("nil should default to %d", defaultInterpolationSteps)
+	}
+	zero := 0
+	if (&Config{PlaybackInterpolationSteps: &zero}).interpolationSteps() != 0 {
+		t.Fatal("explicit 0 should disable (return 0)")
+	}
+	five := 5
+	if (&Config{PlaybackInterpolationSteps: &five}).interpolationSteps() != 5 {
+		t.Fatal("explicit 5 should return 5")
+	}
+}
+```
+
+**Step 2:** Run `go test ./... -run 'Interpolat' -v` → FAIL (undefined symbols).
+
+**Step 3: Implement** in `module.go`:
+
+```go
+const defaultInterpolationSteps = 10
+
+// Config field (pointer so omitted -> default, explicit 0 -> disabled):
+//   PlaybackInterpolationSteps *int `json:"playback_interpolation_steps,omitempty"`
+
+func (cfg *Config) interpolationSteps() int {
+	if cfg.PlaybackInterpolationSteps == nil {
+		return defaultInterpolationSteps
+	}
+	return *cfg.PlaybackInterpolationSteps
+}
+
+// interpolateFrames inserts `steps` linearly-interpolated waypoints between each
+// consecutive pair of frames. steps<=0 (or <2 frames) returns frames unchanged.
+func interpolateFrames(frames [][]float64, steps int) [][]float64 {
+	if steps <= 0 || len(frames) < 2 {
+		return frames
+	}
+	out := make([][]float64, 0, (len(frames)-1)*(steps+1)+1)
+	for i := 0; i < len(frames)-1; i++ {
+		from, to := frames[i], frames[i+1]
+		out = append(out, from)
+		for s := 1; s <= steps; s++ {
+			t := float64(s) / float64(steps+1)
+			pt := make([]float64, len(from))
+			for j := range from {
+				pt[j] = from[j] + (to[j]-from[j])*t
+			}
+			out = append(out, pt)
+		}
+	}
+	return append(out, frames[len(frames)-1])
+}
+```
+
+Add the `PlaybackInterpolationSteps *int` field to `Config`; in `Validate`, reject a non-nil negative value. Add an `interpSteps int` field to the struct and set it in the constructor from `conf.interpolationSteps()`.
+
+**Step 4: Wire into playLoop main motion.** Where the main-motion phase currently passes `sess.Frames[1:]` to `MoveThroughJointPositions`, instead build `dense := interpolateFrames(sess.Frames, s.interpSteps)` and pass `dense[1:]`. (frame[0] is already reached by the safe-entry move; with interpolation off, `dense == sess.Frames` so behavior is unchanged.) Do NOT change the safe-entry move or the gripper track.
+
+**Step 5:** Run `go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1` → all clean.
+
+**Step 6: Docs.** Update `README.md`: add `playback_interpolation_steps` to the attributes table (optional, default 10, set 0 to disable, must be ≥ 0) and add a short "Playback fidelity" note explaining that interpolation densifies waypoints so the blended path follows the recording more closely, that it does not change playback duration (governed by velocity/accel), recommend a starting range (~5–20, raise for faster/sparser recordings), and note interpolation applies to the arm path only (gripper track unchanged).
+
+**Step 7: Commit** — `feat: interpolate playback waypoints for path fidelity` (and the README in the same or a follow-up `docs:` commit).
