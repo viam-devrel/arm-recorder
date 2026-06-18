@@ -99,7 +99,7 @@ Disarm the reactor, stop the poll loop, and send `stop_playback` to the recorder
 
 ### `status`
 
-Return the current reactor state. The `reacting` key is always present. The keys `last_label`, `last_session`, `last_played_at`, and `cooldown_remaining_sec` are present only after at least one successful `play` has been triggered in the current or a prior reacting session. The key `last_error` is present only when the most recent background error (from a failed detection call or a failed `play` call) has not been cleared by a subsequent successful tick.
+Return the current reactor state. The `reacting` key is always present. The keys `last_label`, `last_session`, `last_played_at`, and `cooldown_remaining_sec` are present only after at least one successful `play` has been triggered in the current or a prior reacting session. The key `last_error` is present only when a background error (from a failed detection call or a failed `play` call) has been recorded and not yet cleared. It is cleared when the loop is re-armed with `start_reacting`; a later successful tick does not clear it.
 
 **Request:**
 ```json
