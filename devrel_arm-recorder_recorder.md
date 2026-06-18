@@ -27,7 +27,7 @@ The following attribute template can be used to configure this model:
 | `gripper_position_key` | string | no | `"position"` | The key in the gripper's `get_position`/`set_position` DoCommand payload that holds the numeric position value. Must be symmetric between get and set. |
 | `max_velocity_rads_per_sec` | number | no | — (driver default) | Maximum joint velocity (rad/s) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
 | `max_acceleration_rads_per_sec` | number | no | — (driver default) | Maximum joint acceleration (rad/s²) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
-| `playback_interpolation_steps` | integer | no | `10` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
+| `playback_interpolation_steps` | integer | no | `7` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
 
 ### Playback fidelity
 

@@ -18,7 +18,7 @@ import (
 var Recorder = resource.NewModel("devrel", "arm-recorder", "recorder")
 
 const defaultFrequencyHz = 10.0
-const defaultInterpolationSteps = 10
+const defaultInterpolationSteps = 7
 
 const (
 	stateIdle      = "idle"
