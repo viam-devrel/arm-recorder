@@ -12,7 +12,8 @@ The following attribute template can be used to configure this model:
    "gripper": "my_gripper",
    "gripper_position_key": "position",
    "max_velocity_rads_per_sec": 1.0,
-   "max_acceleration_rads_per_sec": 0.5
+   "max_acceleration_rads_per_sec": 0.5,
+   "playback_interpolation_steps": 10
 }
 ```
 
@@ -26,6 +27,15 @@ The following attribute template can be used to configure this model:
 | `gripper_position_key` | string | no | `"position"` | The key in the gripper's `get_position`/`set_position` DoCommand payload that holds the numeric position value. Must be symmetric between get and set. |
 | `max_velocity_rads_per_sec` | number | no | — (driver default) | Maximum joint velocity (rad/s) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
 | `max_acceleration_rads_per_sec` | number | no | — (driver default) | Maximum joint acceleration (rad/s²) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
+| `playback_interpolation_steps` | integer | no | `10` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
+
+### Playback fidelity
+
+`MoveThroughJointPositions` blends continuously through waypoints and can corner-cut past sparse recorded frames. `playback_interpolation_steps` inserts linearly-interpolated waypoints between each consecutive pair of recorded frames so the blended path follows the recording more closely.
+
+- Setting `playback_interpolation_steps: 0` disables interpolation and passes recorded frames directly — reproducing behavior identical to omitting the attribute in older configurations.
+- Interpolation does **not** change playback duration; total motion time is governed by `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` or the arm driver's defaults.
+- Recommended starting range: 5–20. Raise for faster-moving or sparser recordings. Applies to the arm path only — the gripper track is not affected.
 
 ### Gripper position contract
 

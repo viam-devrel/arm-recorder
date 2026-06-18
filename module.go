@@ -18,6 +18,7 @@ import (
 var Recorder = resource.NewModel("devrel", "arm-recorder", "recorder")
 
 const defaultFrequencyHz = 10.0
+const defaultInterpolationSteps = 10
 
 const (
 	stateIdle      = "idle"
@@ -34,12 +35,13 @@ func init() {
 }
 
 type Config struct {
-	Arm                       string  `json:"arm"`
-	FrequencyHz               float64 `json:"frequency_hz"`
-	Gripper                   string  `json:"gripper,omitempty"`
-	GripperPositionKey        string  `json:"gripper_position_key,omitempty"`
-	MaxVelocityRadsPerSec     float64 `json:"max_velocity_rads_per_sec,omitempty"`
-	MaxAccelerationRadsPerSec float64 `json:"max_acceleration_rads_per_sec,omitempty"`
+	Arm                        string  `json:"arm"`
+	FrequencyHz                float64 `json:"frequency_hz"`
+	Gripper                    string  `json:"gripper,omitempty"`
+	GripperPositionKey         string  `json:"gripper_position_key,omitempty"`
+	MaxVelocityRadsPerSec      float64 `json:"max_velocity_rads_per_sec,omitempty"`
+	MaxAccelerationRadsPerSec  float64 `json:"max_acceleration_rads_per_sec,omitempty"`
+	PlaybackInterpolationSteps *int    `json:"playback_interpolation_steps,omitempty"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -54,6 +56,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.MaxAccelerationRadsPerSec < 0 {
 		return nil, nil, fmt.Errorf("%s: max_acceleration_rads_per_sec must not be negative", path)
+	}
+	if cfg.PlaybackInterpolationSteps != nil && *cfg.PlaybackInterpolationSteps < 0 {
+		return nil, nil, fmt.Errorf("%s: playback_interpolation_steps must not be negative", path)
 	}
 	deps := []string{cfg.Arm}
 	if cfg.Gripper != "" {
@@ -76,6 +81,35 @@ func (cfg *Config) gripperPositionKey() string {
 	return cfg.GripperPositionKey
 }
 
+func (cfg *Config) interpolationSteps() int {
+	if cfg.PlaybackInterpolationSteps == nil {
+		return defaultInterpolationSteps
+	}
+	return *cfg.PlaybackInterpolationSteps
+}
+
+// interpolateFrames inserts `steps` linearly-interpolated waypoints between each
+// consecutive pair of frames. steps<=0 (or <2 frames) returns frames unchanged.
+func interpolateFrames(frames [][]float64, steps int) [][]float64 {
+	if steps <= 0 || len(frames) < 2 {
+		return frames
+	}
+	out := make([][]float64, 0, (len(frames)-1)*(steps+1)+1)
+	for i := 0; i < len(frames)-1; i++ {
+		from, to := frames[i], frames[i+1]
+		out = append(out, from)
+		for s := 1; s <= steps; s++ {
+			t := float64(s) / float64(steps+1)
+			pt := make([]float64, len(from))
+			for j := range from {
+				pt[j] = from[j] + (to[j]-from[j])*t
+			}
+			out = append(out, pt)
+		}
+	}
+	return append(out, frames[len(frames)-1])
+}
+
 type armRecorderRecorder struct {
 	resource.AlwaysRebuild
 	resource.Named
@@ -86,9 +120,10 @@ type armRecorderRecorder struct {
 	freqHz  float64
 	dataDir string
 
-	gripper    gripper.Gripper
-	gripperKey string
-	moveOpts   *arm.MoveOptions
+	gripper     gripper.Gripper
+	gripperKey  string
+	moveOpts    *arm.MoveOptions
+	interpSteps int
 
 	mu               sync.Mutex
 	state            string
@@ -139,6 +174,8 @@ func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, raw
 			MaxAccRads: conf.MaxAccelerationRadsPerSec,
 		}
 	}
+
+	rec.interpSteps = conf.interpolationSteps()
 
 	return rec, nil
 }
@@ -563,10 +600,11 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 	// NOTE: this assumes the arm driver honors context cancellation to return from
 	// the blocking MoveThroughJointPositions call; if it doesn't, stopPlayback/Close
 	// would block on <-done.
+	dense := interpolateFrames(sess.Frames, s.interpSteps)
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		if err := s.arm.MoveThroughJointPositions(ctx2, sess.Frames[1:], s.moveOpts, nil); err != nil {
+		if err := s.arm.MoveThroughJointPositions(ctx2, dense[1:], s.moveOpts, nil); err != nil {
 			// If the context was canceled (by us or the outer stop) that's expected —
 			// don't treat it as a real error.
 			if ctx2.Err() != nil {

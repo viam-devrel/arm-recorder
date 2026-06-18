@@ -19,6 +19,15 @@ See the [recorder documentation](./devrel_arm-recorder_recorder.md) for informat
 - **Session name safety.** Session names must not contain path separators (`/`, `\`) or the sequence `..`. Invalid names are rejected with an error.
 - **Session without gripper data.** If a session was recorded without a gripper (or is an older file without gripper fields) but a gripper is currently configured, playback proceeds arm-only and a log message is emitted. If a session has gripper data but no gripper is configured, playback is rejected with an error.
 
+## Playback fidelity
+
+`MoveThroughJointPositions` blends continuously through waypoints, which means it can corner-cut past sparse recorded frames — the actual arm path may deviate from the recorded path between distant waypoints. The `playback_interpolation_steps` attribute controls how many linearly-interpolated waypoints are inserted between each consecutive pair of recorded frames before the blended move is issued.
+
+- **Default is 10.** A value of 10 inserts 10 intermediate points between each pair of recorded frames, which is a good starting point for typical recordings.
+- **Set to 0 to disable.** With `playback_interpolation_steps: 0`, recorded frames are passed directly to `MoveThroughJointPositions` — this exactly reproduces behavior from before this feature was added.
+- **Recommended range: 5–20.** Raise the value for faster-moving or sparser recordings where the arm covers more distance between frames. Very large values produce more waypoints and may slightly increase the time spent building the waypoint list, but do not change overall playback duration (which is governed by `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` or the arm driver's defaults).
+- **Applies to the arm path only.** The gripper track is driven by a parallel wall-clock ticker aligned to the recording frequency and is not affected by interpolation.
+
 ## Session file format
 
 Session files are JSON written to `$VIAM_MODULE_DATA/<session>.json`. The top-level fields are:
