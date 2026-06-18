@@ -6,9 +6,12 @@ import (
 	sensor "go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/generic"
 )
 
 func main() {
-	// ModularMain can take multiple APIModel arguments, if your module implements multiple models.
-	module.ModularMain(resource.APIModel{API: sensor.API, Model: armrecorder.Recorder})
+	module.ModularMain(
+		resource.APIModel{API: sensor.API, Model: armrecorder.Recorder},
+		resource.APIModel{API: generic.API, Model: armrecorder.Reactor},
+	)
 }
