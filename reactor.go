@@ -3,6 +3,7 @@ package armrecorder
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -31,8 +32,58 @@ type ReactorConfig struct {
 	CooldownSec    float64           `json:"cooldown_sec"`
 }
 
+const (
+	defaultPollIntervalMs = 500
+	defaultMinConfidence  = 0.5
+	defaultCooldownSec    = 5.0
+)
+
 func (cfg *ReactorConfig) Validate(path string) ([]string, []string, error) {
-	return nil, nil, nil
+	if cfg.VisionService == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "vision_service")
+	}
+	if cfg.Camera == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "camera")
+	}
+	if cfg.Recorder == "" {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "recorder")
+	}
+	if len(cfg.LabelSessions) == 0 {
+		return nil, nil, fmt.Errorf("%s: label_sessions must not be empty", path)
+	}
+	if cfg.MinConfidence < 0 || cfg.MinConfidence > 1 {
+		return nil, nil, fmt.Errorf("%s: min_confidence must be within [0,1]", path)
+	}
+	if cfg.CooldownSec < 0 {
+		return nil, nil, fmt.Errorf("%s: cooldown_sec must not be negative", path)
+	}
+	if cfg.PollIntervalMs < 0 {
+		return nil, nil, fmt.Errorf("%s: poll_interval_ms must not be negative", path)
+	}
+	return []string{cfg.VisionService, cfg.Camera, cfg.Recorder}, nil, nil
+}
+
+func (cfg *ReactorConfig) pollInterval() time.Duration {
+	ms := cfg.PollIntervalMs
+	if ms <= 0 {
+		ms = defaultPollIntervalMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func (cfg *ReactorConfig) minConfidence() float64 {
+	if cfg.MinConfidence <= 0 {
+		return defaultMinConfidence
+	}
+	return cfg.MinConfidence
+}
+
+func (cfg *ReactorConfig) cooldown() time.Duration {
+	s := cfg.CooldownSec
+	if s <= 0 {
+		s = defaultCooldownSec
+	}
+	return time.Duration(s * float64(time.Second))
 }
 
 type reactor struct {
