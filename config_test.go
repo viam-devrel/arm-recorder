@@ -1,6 +1,10 @@
 package armrecorder
 
-import "testing"
+import (
+	"encoding/json"
+	"math"
+	"testing"
+)
 
 func TestConfigValidate(t *testing.T) {
 	t.Run("missing arm is an error", func(t *testing.T) {
@@ -88,6 +92,83 @@ func TestGripperConfig(t *testing.T) {
 		cfg := &Config{Arm: "my_arm", GripperPositionKey: "my_key"}
 		if got := cfg.gripperPositionKey(); got != "my_key" {
 			t.Fatalf("expected key %q, got %q", "my_key", got)
+		}
+	})
+}
+
+func TestRecorderConfigHomePose(t *testing.T) {
+	base := func() *Config { return &Config{Arm: "a"} }
+
+	t.Run("home_pose is optional", func(t *testing.T) {
+		if _, _, err := base().Validate("p"); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("switch form is accepted and becomes a dependency", func(t *testing.T) {
+		cfg := base()
+		cfg.HomePose = &HomePose{Switch: "cam-pose"}
+		deps, _, err := cfg.Validate("p")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		found := false
+		for _, d := range deps {
+			if d == "cam-pose" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("a switch-form home_pose must be declared as a dependency, got %v", deps)
+		}
+	})
+
+	t.Run("literal form is accepted and adds no dependency", func(t *testing.T) {
+		cfg := base()
+		cfg.HomePose = &HomePose{Joints: []float64{0, 1, 2}}
+		deps, _, err := cfg.Validate("p")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(deps) != 1 || deps[0] != "a" {
+			t.Fatalf("expected only the arm, got %v", deps)
+		}
+	})
+
+	t.Run("empty home_pose is rejected", func(t *testing.T) {
+		cfg := base()
+		cfg.HomePose = &HomePose{}
+		if _, _, err := cfg.Validate("p"); err == nil {
+			t.Fatal("expected an error for an empty home_pose")
+		}
+	})
+
+	t.Run("non-finite joints are rejected", func(t *testing.T) {
+		cfg := base()
+		cfg.HomePose = &HomePose{Joints: []float64{math.NaN()}}
+		if _, _, err := cfg.Validate("p"); err == nil {
+			t.Fatal("expected an error for NaN joints")
+		}
+	})
+
+	t.Run("parses from a full config document", func(t *testing.T) {
+		for raw, wantSwitch := range map[string]string{
+			`{"arm":"a","home_pose":"cam-pose"}`:         "cam-pose",
+			`{"arm":"a","home_pose":[-0.48,-0.16,0.32]}`: "",
+		} {
+			var cfg Config
+			if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+			if cfg.HomePose == nil {
+				t.Fatalf("home_pose not parsed from %s", raw)
+			}
+			if cfg.HomePose.Switch != wantSwitch {
+				t.Fatalf("%s: expected switch %q, got %q", raw, wantSwitch, cfg.HomePose.Switch)
+			}
+			if _, _, err := cfg.Validate("p"); err != nil {
+				t.Fatalf("validate %s: %v", raw, err)
+			}
 		}
 	})
 }
