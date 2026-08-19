@@ -62,17 +62,17 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.PlaybackInterpolationSteps != nil && *cfg.PlaybackInterpolationSteps < 0 {
 		return nil, nil, fmt.Errorf("%s: playback_interpolation_steps must not be negative", path)
 	}
+	deps := []string{cfg.Arm}
 	if cfg.HomePose != nil {
 		if err := cfg.HomePose.validate(path); err != nil {
 			return nil, nil, err
 		}
+		if cfg.HomePose.usesSwitch() {
+			deps = append(deps, cfg.HomePose.Switch)
+		}
 	}
-	deps := []string{cfg.Arm}
 	if cfg.Gripper != "" {
 		deps = append(deps, cfg.Gripper)
-	}
-	if cfg.HomePose != nil && cfg.HomePose.usesSwitch() {
-		deps = append(deps, cfg.HomePose.Switch)
 	}
 	return deps, nil, nil
 }
