@@ -1,7 +1,6 @@
 package armrecorder
 
 import (
-	"math"
 	"testing"
 
 	"go.viam.com/rdk/resource"
@@ -112,20 +111,17 @@ func homePoseFromAttributes(t *testing.T, raw interface{}) (*Config, error) {
 }
 
 func TestRecorderConfigHomePose(t *testing.T) {
-	t.Run("a bare string decodes as a switch name", func(t *testing.T) {
-		// The regression: mapstructure rejected a typed struct field here with
-		// "'home_pose' expected a map or struct, got \"string\"".
+	t.Run("a switch name decodes and becomes a dependency", func(t *testing.T) {
 		cfg, err := homePoseFromAttributes(t, "cam-pose")
 		if err != nil {
 			t.Fatalf("viam-server would reject this config: %v", err)
 		}
+		if cfg.HomePose != "cam-pose" {
+			t.Fatalf("expected cam-pose, got %q", cfg.HomePose)
+		}
 		deps, _, err := cfg.Validate("p")
 		if err != nil {
 			t.Fatalf("validate: %v", err)
-		}
-		home, err := parseHomePose(cfg.HomePose)
-		if err != nil || home.Switch != "cam-pose" {
-			t.Fatalf("expected switch cam-pose, got %+v err=%v", home, err)
 		}
 		found := false
 		for _, d := range deps {
@@ -138,79 +134,49 @@ func TestRecorderConfigHomePose(t *testing.T) {
 		}
 	})
 
-	t.Run("an array decodes as joint positions", func(t *testing.T) {
-		// Numbers arrive as float64 from the protobuf struct.
-		cfg, err := homePoseFromAttributes(t, []interface{}{-0.48, -0.16, 0.32})
-		if err != nil {
-			t.Fatalf("viam-server would reject this config: %v", err)
-		}
-		deps, _, err := cfg.Validate("p")
-		if err != nil {
-			t.Fatalf("validate: %v", err)
-		}
-		home, _ := parseHomePose(cfg.HomePose)
-		if len(home.Joints) != 3 || home.Joints[0] != -0.48 {
-			t.Fatalf("expected literal joints, got %+v", home)
-		}
-		if len(deps) != 1 {
-			t.Fatalf("literal joints must add no dependency, got %v", deps)
-		}
-	})
-
-	t.Run("integers in the array are accepted", func(t *testing.T) {
-		cfg, err := homePoseFromAttributes(t, []interface{}{0, 1, 2})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := cfg.Validate("p"); err != nil {
-			t.Fatalf("validate: %v", err)
-		}
-	})
-
 	t.Run("home_pose is optional", func(t *testing.T) {
 		cfg, err := homePoseFromAttributes(t, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := cfg.Validate("p"); err != nil {
+		deps, _, err := cfg.Validate("p")
+		if err != nil {
 			t.Fatalf("validate: %v", err)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("expected only the arm, got %v", deps)
 		}
 	})
 
-	t.Run("unusable forms are rejected with a clear message", func(t *testing.T) {
+	t.Run("a padded name is rejected", func(t *testing.T) {
+		cfg, err := homePoseFromAttributes(t, " cam-pose ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := cfg.Validate("p"); err == nil {
+			t.Fatal("a padded name would never resolve as a dependency")
+		}
+	})
+
+	t.Run("non-string forms are rejected at decode", func(t *testing.T) {
+		// A plain string field is a type mapstructure handles natively, so these
+		// fail in the decoder rather than needing custom parsing.
 		for _, bad := range []interface{}{
-			float64(42),
-			true,
-			[]interface{}{"elbow"},
+			[]interface{}{-0.48, -0.16},
 			map[string]interface{}{"pose": "x"},
 		} {
-			cfg, err := homePoseFromAttributes(t, bad)
-			if err != nil {
-				continue // rejected at decode, also fine
-			}
-			if _, _, err := cfg.Validate("p"); err == nil {
+			if _, err := homePoseFromAttributes(t, bad); err == nil {
 				t.Fatalf("expected %v (%T) to be rejected", bad, bad)
 			}
 		}
 	})
+}
 
-	t.Run("empty joint array is rejected", func(t *testing.T) {
-		cfg, err := homePoseFromAttributes(t, []interface{}{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := cfg.Validate("p"); err == nil {
-			t.Fatal("an empty home_pose must be rejected")
-		}
-	})
-
-	t.Run("non-finite joints are rejected", func(t *testing.T) {
-		cfg, err := homePoseFromAttributes(t, []interface{}{math.NaN()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := cfg.Validate("p"); err == nil {
-			t.Fatal("NaN joints must be rejected")
-		}
-	})
+func TestArmPositionSaverGoToPosition(t *testing.T) {
+	// arm-position-saver reports ["idle", "update config", "go to"], so "go to"
+	// is index 2. If that drifts upstream, returning home would drive the switch
+	// to "update config" and overwrite the saved pose instead of replaying it.
+	if armPositionSaverGoTo != 2 {
+		t.Fatalf("expected the go-to position to be 2, got %d", armPositionSaverGoTo)
+	}
 }

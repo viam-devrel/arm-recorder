@@ -36,14 +36,14 @@ func init() {
 }
 
 type Config struct {
-	Arm                        string      `json:"arm"`
-	FrequencyHz                float64     `json:"frequency_hz"`
-	Gripper                    string      `json:"gripper,omitempty"`
-	GripperPositionKey         string      `json:"gripper_position_key,omitempty"`
-	MaxVelocityRadsPerSec      float64     `json:"max_velocity_rads_per_sec,omitempty"`
-	MaxAccelerationRadsPerSec  float64     `json:"max_acceleration_rads_per_sec,omitempty"`
-	PlaybackInterpolationSteps *int        `json:"playback_interpolation_steps,omitempty"`
-	HomePose                   interface{} `json:"home_pose,omitempty"`
+	Arm                        string  `json:"arm"`
+	FrequencyHz                float64 `json:"frequency_hz"`
+	Gripper                    string  `json:"gripper,omitempty"`
+	GripperPositionKey         string  `json:"gripper_position_key,omitempty"`
+	MaxVelocityRadsPerSec      float64 `json:"max_velocity_rads_per_sec,omitempty"`
+	MaxAccelerationRadsPerSec  float64 `json:"max_acceleration_rads_per_sec,omitempty"`
+	PlaybackInterpolationSteps *int    `json:"playback_interpolation_steps,omitempty"`
+	HomePose                   string  `json:"home_pose,omitempty"`
 }
 
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -63,17 +63,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		return nil, nil, fmt.Errorf("%s: playback_interpolation_steps must not be negative", path)
 	}
 	deps := []string{cfg.Arm}
-	if cfg.HomePose != nil {
-		home, err := parseHomePose(cfg.HomePose)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if err := home.validate(path); err != nil {
+	if cfg.HomePose != "" {
+		if err := validateHomePose(cfg.HomePose, path); err != nil {
 			return nil, nil, err
 		}
-		if home.usesSwitch() {
-			deps = append(deps, home.Switch)
-		}
+		deps = append(deps, cfg.HomePose)
 	}
 	if cfg.Gripper != "" {
 		deps = append(deps, cfg.Gripper)
@@ -137,7 +131,6 @@ type armRecorderRecorder struct {
 	gripper     gripper.Gripper
 	gripperKey  string
 	homeSwitch  toggleswitch.Switch
-	homePose    *HomePose
 	moveOpts    *arm.MoveOptions
 	interpSteps int
 
@@ -191,15 +184,10 @@ func newArmRecorderRecorder(ctx context.Context, deps resource.Dependencies, raw
 		}
 	}
 
-	home, err := parseHomePose(conf.HomePose)
-	if err != nil {
-		return nil, err
-	}
-	rec.homePose = home
-	if home != nil && home.usesSwitch() {
-		sw, err := toggleswitch.FromProvider(deps, home.Switch)
+	if conf.HomePose != "" {
+		sw, err := toggleswitch.FromProvider(deps, conf.HomePose)
 		if err != nil {
-			return nil, fmt.Errorf("could not get home_pose switch %q: %w", home.Switch, err)
+			return nil, fmt.Errorf("could not get home_pose switch %q: %w", conf.HomePose, err)
 		}
 		rec.homeSwitch = sw
 	}
@@ -690,24 +678,19 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 	// Return home: only reached on clean completion, since every abort path above
 	// has returned. The deferred state reset has not run yet, so the component
 	// still reports "playing" and a play arriving mid-return is rejected as busy.
-	if s.homePose != nil {
+	if s.homeSwitch != nil {
 		s.returnHome(ctx, sess.Name)
 	}
 
 	s.logger.Infof("playback of session %q complete", sess.Name)
 }
 
-// returnHome sends the arm back to the configured home pose. A switch-form pose
-// is replayed by the switch, so its own speed limits and motion planning apply
-// rather than ours. Failures surface in last_error but do not halt the arm.
+// returnHome drives the home_pose switch to its "go to" position. The switch
+// performs the move, so its own speed limits and motion planning apply rather
+// than ours. Failures surface in last_error but do not halt the arm: the
+// playback itself succeeded.
 func (s *armRecorderRecorder) returnHome(ctx context.Context, playedSession string) {
-	var err error
-	if s.homePose.usesSwitch() {
-		err = s.homeSwitch.SetPosition(ctx, armPositionSaverGoTo, nil)
-	} else {
-		err = s.arm.MoveThroughJointPositions(ctx, [][]float64{s.homePose.Joints}, s.moveOpts, nil)
-	}
-	if err != nil {
+	if err := s.homeSwitch.SetPosition(ctx, armPositionSaverGoTo, nil); err != nil {
 		if ctx.Err() != nil {
 			// Stopped while returning home — expected, not a fault.
 			return

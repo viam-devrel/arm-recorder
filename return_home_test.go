@@ -28,7 +28,7 @@ type recorderHarness struct {
 	stops   int
 }
 
-func newHarness(t *testing.T, home *HomePose) *recorderHarness {
+func newHarness(t *testing.T, homeSwitch bool) *recorderHarness {
 	t.Helper()
 	h := &recorderHarness{arm: inject.NewArm("a"), sw: inject.NewSwitch("cam-pose")}
 
@@ -69,9 +69,8 @@ func newHarness(t *testing.T, home *HomePose) *recorderHarness {
 		dataDir:     t.TempDir(),
 		state:       stateIdle,
 		interpSteps: 0,
-		homePose:    home,
 	}
-	if home != nil && home.usesSwitch() {
+	if homeSwitch {
 		h.rec.homeSwitch = h.sw
 	}
 	return h
@@ -107,7 +106,7 @@ func (h *recorderHarness) snapshot() ([][][]float64, []uint32, int) {
 }
 
 func TestReturnHomeDrivesTheSwitch(t *testing.T) {
-	h := newHarness(t, &HomePose{Switch: "cam-pose"})
+	h := newHarness(t, true)
 	h.playAndWait(t, "wave")
 
 	_, positions, _ := h.snapshot()
@@ -120,22 +119,8 @@ func TestReturnHomeDrivesTheSwitch(t *testing.T) {
 	}
 }
 
-func TestReturnHomeMovesToLiteralJoints(t *testing.T) {
-	h := newHarness(t, &HomePose{Joints: []float64{9, 9}})
-	h.playAndWait(t, "wave")
-
-	moves, positions, _ := h.snapshot()
-	if len(positions) != 0 {
-		t.Fatalf("literal joints must not touch a switch, got %v", positions)
-	}
-	last := moves[len(moves)-1]
-	if len(last) != 1 || last[0][0] != 9 || last[0][1] != 9 {
-		t.Fatalf("expected the final move to be the home pose, got %v", last)
-	}
-}
-
 func TestNoHomePoseLeavesTheArmWhereItEnded(t *testing.T) {
-	h := newHarness(t, nil)
+	h := newHarness(t, false)
 	h.playAndWait(t, "wave")
 
 	moves, positions, _ := h.snapshot()
@@ -149,7 +134,7 @@ func TestNoHomePoseLeavesTheArmWhereItEnded(t *testing.T) {
 }
 
 func TestStopPlaybackDoesNotReturnHome(t *testing.T) {
-	h := newHarness(t, &HomePose{Switch: "cam-pose"})
+	h := newHarness(t, true)
 
 	// Block the main motion so the stop lands mid-playback.
 	release := make(chan struct{})
@@ -205,7 +190,7 @@ func TestStopPlaybackDoesNotReturnHome(t *testing.T) {
 }
 
 func TestRecorderReportsBusyUntilHomeIsReached(t *testing.T) {
-	h := newHarness(t, &HomePose{Switch: "cam-pose"})
+	h := newHarness(t, true)
 
 	// Hold the switch call open and check the state while the return is running.
 	inHome := make(chan struct{})
