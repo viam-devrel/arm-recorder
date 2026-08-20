@@ -1,7 +1,6 @@
 package armrecorder
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -19,27 +18,50 @@ type HomePose struct {
 	Joints []float64
 }
 
-func (h *HomePose) UnmarshalJSON(b []byte) error {
-	var name string
-	if err := json.Unmarshal(b, &name); err == nil {
-		h.Switch, h.Joints = name, nil
-		return nil
+// parseHomePose reads the raw home_pose attribute.
+//
+// It cannot be a typed struct field with an UnmarshalJSON: viam-server decodes
+// attributes with mapstructure (TagName "json", no decode hooks), which never
+// consults json.Unmarshaler and rejects a bare string with "expected a map or
+// struct". Numbers arrive as float64 from the protobuf struct.
+func parseHomePose(raw interface{}) (*HomePose, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return &HomePose{Switch: v}, nil
+	case []float64:
+		return &HomePose{Joints: v}, nil
+	case []interface{}:
+		joints := make([]float64, 0, len(v))
+		for i, e := range v {
+			f, ok := toFloat(e)
+			if !ok {
+				return nil, fmt.Errorf("home_pose joint %d is not a number", i)
+			}
+			joints = append(joints, f)
+		}
+		return &HomePose{Joints: joints}, nil
+	default:
+		return nil, fmt.Errorf(
+			"home_pose must be either the name of a pose-saving switch (string) "+
+				"or joint positions (array of numbers), got %T", raw)
 	}
-	var joints []float64
-	if err := json.Unmarshal(b, &joints); err == nil {
-		h.Switch, h.Joints = "", joints
-		return nil
-	}
-	return fmt.Errorf(
-		"home_pose must be either the name of a pose-saving switch (string) " +
-			"or joint positions (array of numbers)")
 }
 
-func (h HomePose) MarshalJSON() ([]byte, error) {
-	if h.Switch != "" {
-		return json.Marshal(h.Switch)
+func toFloat(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
 	}
-	return json.Marshal(h.Joints)
 }
 
 func (h *HomePose) usesSwitch() bool {

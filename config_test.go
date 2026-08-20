@@ -1,9 +1,11 @@
 package armrecorder
 
 import (
-	"encoding/json"
 	"math"
 	"testing"
+
+	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/utils"
 )
 
 func TestConfigValidate(t *testing.T) {
@@ -96,21 +98,34 @@ func TestGripperConfig(t *testing.T) {
 	})
 }
 
+// homePoseFromAttributes decodes through the same path viam-server uses:
+// resource.TransformAttributeMap, which is mapstructure with TagName "json" and
+// no decode hooks. Testing json.Unmarshal instead is what let a config that
+// viam-server rejects pass a full green test suite.
+func homePoseFromAttributes(t *testing.T, raw interface{}) (*Config, error) {
+	t.Helper()
+	attrs := utils.AttributeMap{"arm": "a"}
+	if raw != nil {
+		attrs["home_pose"] = raw
+	}
+	return resource.TransformAttributeMap[*Config](attrs)
+}
+
 func TestRecorderConfigHomePose(t *testing.T) {
-	base := func() *Config { return &Config{Arm: "a"} }
-
-	t.Run("home_pose is optional", func(t *testing.T) {
-		if _, _, err := base().Validate("p"); err != nil {
-			t.Fatalf("expected no error, got %v", err)
+	t.Run("a bare string decodes as a switch name", func(t *testing.T) {
+		// The regression: mapstructure rejected a typed struct field here with
+		// "'home_pose' expected a map or struct, got \"string\"".
+		cfg, err := homePoseFromAttributes(t, "cam-pose")
+		if err != nil {
+			t.Fatalf("viam-server would reject this config: %v", err)
 		}
-	})
-
-	t.Run("switch form is accepted and becomes a dependency", func(t *testing.T) {
-		cfg := base()
-		cfg.HomePose = &HomePose{Switch: "cam-pose"}
 		deps, _, err := cfg.Validate("p")
 		if err != nil {
-			t.Fatalf("expected no error, got %v", err)
+			t.Fatalf("validate: %v", err)
+		}
+		home, err := parseHomePose(cfg.HomePose)
+		if err != nil || home.Switch != "cam-pose" {
+			t.Fatalf("expected switch cam-pose, got %+v err=%v", home, err)
 		}
 		found := false
 		for _, d := range deps {
@@ -119,56 +134,83 @@ func TestRecorderConfigHomePose(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("a switch-form home_pose must be declared as a dependency, got %v", deps)
+			t.Fatalf("switch must be a dependency, got %v", deps)
 		}
 	})
 
-	t.Run("literal form is accepted and adds no dependency", func(t *testing.T) {
-		cfg := base()
-		cfg.HomePose = &HomePose{Joints: []float64{0, 1, 2}}
+	t.Run("an array decodes as joint positions", func(t *testing.T) {
+		// Numbers arrive as float64 from the protobuf struct.
+		cfg, err := homePoseFromAttributes(t, []interface{}{-0.48, -0.16, 0.32})
+		if err != nil {
+			t.Fatalf("viam-server would reject this config: %v", err)
+		}
 		deps, _, err := cfg.Validate("p")
 		if err != nil {
-			t.Fatalf("expected no error, got %v", err)
+			t.Fatalf("validate: %v", err)
 		}
-		if len(deps) != 1 || deps[0] != "a" {
-			t.Fatalf("expected only the arm, got %v", deps)
+		home, _ := parseHomePose(cfg.HomePose)
+		if len(home.Joints) != 3 || home.Joints[0] != -0.48 {
+			t.Fatalf("expected literal joints, got %+v", home)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("literal joints must add no dependency, got %v", deps)
 		}
 	})
 
-	t.Run("empty home_pose is rejected", func(t *testing.T) {
-		cfg := base()
-		cfg.HomePose = &HomePose{}
+	t.Run("integers in the array are accepted", func(t *testing.T) {
+		cfg, err := homePoseFromAttributes(t, []interface{}{0, 1, 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := cfg.Validate("p"); err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+	})
+
+	t.Run("home_pose is optional", func(t *testing.T) {
+		cfg, err := homePoseFromAttributes(t, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := cfg.Validate("p"); err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+	})
+
+	t.Run("unusable forms are rejected with a clear message", func(t *testing.T) {
+		for _, bad := range []interface{}{
+			float64(42),
+			true,
+			[]interface{}{"elbow"},
+			map[string]interface{}{"pose": "x"},
+		} {
+			cfg, err := homePoseFromAttributes(t, bad)
+			if err != nil {
+				continue // rejected at decode, also fine
+			}
+			if _, _, err := cfg.Validate("p"); err == nil {
+				t.Fatalf("expected %v (%T) to be rejected", bad, bad)
+			}
+		}
+	})
+
+	t.Run("empty joint array is rejected", func(t *testing.T) {
+		cfg, err := homePoseFromAttributes(t, []interface{}{})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, _, err := cfg.Validate("p"); err == nil {
-			t.Fatal("expected an error for an empty home_pose")
+			t.Fatal("an empty home_pose must be rejected")
 		}
 	})
 
 	t.Run("non-finite joints are rejected", func(t *testing.T) {
-		cfg := base()
-		cfg.HomePose = &HomePose{Joints: []float64{math.NaN()}}
-		if _, _, err := cfg.Validate("p"); err == nil {
-			t.Fatal("expected an error for NaN joints")
+		cfg, err := homePoseFromAttributes(t, []interface{}{math.NaN()})
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-
-	t.Run("parses from a full config document", func(t *testing.T) {
-		for raw, wantSwitch := range map[string]string{
-			`{"arm":"a","home_pose":"cam-pose"}`:         "cam-pose",
-			`{"arm":"a","home_pose":[-0.48,-0.16,0.32]}`: "",
-		} {
-			var cfg Config
-			if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-				t.Fatalf("unmarshal %s: %v", raw, err)
-			}
-			if cfg.HomePose == nil {
-				t.Fatalf("home_pose not parsed from %s", raw)
-			}
-			if cfg.HomePose.Switch != wantSwitch {
-				t.Fatalf("%s: expected switch %q, got %q", raw, wantSwitch, cfg.HomePose.Switch)
-			}
-			if _, _, err := cfg.Validate("p"); err != nil {
-				t.Fatalf("validate %s: %v", raw, err)
-			}
+		if _, _, err := cfg.Validate("p"); err == nil {
+			t.Fatal("NaN joints must be rejected")
 		}
 	})
 }
