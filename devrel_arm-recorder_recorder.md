@@ -27,7 +27,7 @@ The following attribute template can be used to configure this model:
 | `gripper_position_key` | string | no | `"position"` | The key in the gripper's `get_position`/`set_position` DoCommand payload that holds the numeric position value. Must be symmetric between get and set. |
 | `max_velocity_rads_per_sec` | number | no | — (driver default) | Maximum joint velocity (rad/s) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
 | `max_acceleration_rads_per_sec` | number | no | — (driver default) | Maximum joint acceleration (rad/s²) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
-| `home_pose` | string or array | no | — | Where the arm returns after a playback completes. Either the name of a switch component that replays a saved pose (such as `erh:vmodutils:arm-position-saver`), which must also appear in `depends_on`, or literal joint positions like `[-0.48, -0.16, 0.32, -0.18, -1.55]`. Omitting this leaves the arm at the last recorded frame. See [Returning home](#returning-home). |
+| `home_pose` | string | no | — | Name of a switch component whose "go to" position replays a saved pose, such as `erh:vmodutils:arm-position-saver`. The arm returns there after a playback completes. Omitting this leaves the arm at the last recorded frame. See [Returning home](#returning-home). |
 | `playback_interpolation_steps` | integer | no | `7` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
 
 ### Playback fidelity
@@ -42,8 +42,7 @@ The following attribute template can be used to configure this model:
 
 Without `home_pose`, playback ends with the arm at the last recorded frame. `home_pose` adds a move back to a fixed configuration once the motion completes, which matters wherever the resting position is load-bearing — an arm-mounted camera, for instance, must be pointing somewhere useful before the next command arrives.
 
-- A **string** names a switch component whose "go to" position replays a saved pose, such as `erh:vmodutils:arm-position-saver`. The switch performs the move, so its own speed limits and motion planning apply rather than this component's. Saving the pose is done through that switch, not here.
-- An **array** is a literal arm configuration, moved to directly under `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec`.
+- The named switch is driven to its **"go to"** position. The switch performs the move, so its own speed limits and motion planning apply rather than this component's. Saving the pose is done through that switch, not here.
 - The return runs **only** after a playback completes normally. `stop_playback` and failed playbacks leave the arm where it halted.
 - The component reports `playing` for the duration of the return, so a `play` arriving before the arm is home is rejected as busy rather than competing for the arm.
 - A failed return is recorded in `last_error` and does **not** stop the arm; the playback itself already succeeded.
