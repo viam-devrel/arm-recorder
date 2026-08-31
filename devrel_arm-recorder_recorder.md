@@ -12,8 +12,7 @@ The following attribute template can be used to configure this model:
    "gripper": "my_gripper",
    "gripper_position_key": "position",
    "max_velocity_rads_per_sec": 1.0,
-   "max_acceleration_rads_per_sec": 0.5,
-   "playback_interpolation_steps": 10
+   "max_acceleration_rads_per_sec": 0.5
 }
 ```
 
@@ -28,15 +27,19 @@ The following attribute template can be used to configure this model:
 | `max_velocity_rads_per_sec` | number | no | — (driver default) | Maximum joint velocity (rad/s) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
 | `max_acceleration_rads_per_sec` | number | no | — (driver default) | Maximum joint acceleration (rad/s²) passed to `MoveThroughJointPositions` for the entire playback motion, including the initial safe-entry move to the first recorded frame. Omitting this leaves the value unset and uses the arm driver's default. Must not be negative. |
 | `home_pose` | string | no | — | Name of a switch component whose "go to" position replays a saved pose, such as `erh:vmodutils:arm-position-saver`. The arm returns there after a playback completes. Omitting this leaves the arm at the last recorded frame. See [Returning home](#returning-home). |
-| `playback_interpolation_steps` | integer | no | `7` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
+| `playback_interpolation_steps` | integer | no | `0` (off) | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the arm move. Only useful on an arm driver that blends a spline through the waypoint list; on a driver that commands one segment per waypoint it multiplies waypoints without changing the path. Must not be negative. See [Playback fidelity](#playback-fidelity). |
 
 ### Playback fidelity
 
-`MoveThroughJointPositions` blends continuously through waypoints and can corner-cut past sparse recorded frames. `playback_interpolation_steps` inserts linearly-interpolated waypoints between each consecutive pair of recorded frames so the blended path follows the recording more closely.
+This component hands the recorded frames to the arm driver as one waypoint list. `MoveThroughJointPositions` is specified as "move through these joint configurations in order" and does not say *how*, so playback fidelity is mostly a property of the driver.
 
-- Setting `playback_interpolation_steps: 0` disables interpolation and passes recorded frames directly — reproducing behavior identical to omitting the attribute in older configurations.
+**If playback looks dead — the arm reaches the first frame and then barely moves — suspect the driver, not the recording.** A driver that writes every waypoint back-to-back without waiting lets each goal supersede the last, so only the final waypoint is executed. Since a recording usually starts and ends near rest, that replays as a small move back to roughly the starting pose. Interpolation cannot fix this; more waypoints are simply discarded faster. Verify the recording first by inspecting the session JSON's `frames` for the joint travel you expect.
+
+**Interpolation is for the other failure mode:** a driver that blends a spline through the waypoint list can corner-cut past sparse recorded frames, bowing the path away from the recording between distant waypoints. `playback_interpolation_steps` inserts intermediate waypoints so the blended path follows the recording more closely.
+
+- **Default `0` (off).** On a driver that commands one segment per waypoint — including [`devrel:so101:arm`](https://github.com/viam-devrel/so-101) — every interpolated point lies on the straight line the arm was already going to travel, so the path is unchanged and the only effect is `steps+1` times as many waypoints and as much bus traffic.
 - Interpolation does **not** change playback duration; total motion time is governed by `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` or the arm driver's defaults.
-- Recommended starting range: 5–20. Raise for faster-moving or sparser recordings. Applies to the arm path only — the gripper track is not affected.
+- For a blending driver, 5–20 is a sensible starting range. Raise for faster-moving or sparser recordings. Applies to the arm path only — the gripper track is not affected.
 
 ### Returning home
 

@@ -19,7 +19,21 @@ import (
 var Recorder = resource.NewModel("devrel", "arm-recorder", "recorder")
 
 const defaultFrequencyHz = 10.0
-const defaultInterpolationSteps = 7
+
+// defaultInterpolationSteps is 0 -- interpolation off by default.
+//
+// This attribute exists for arm drivers whose MoveThroughJointPositions really does blend a
+// spline through the waypoint list, where sparse recorded frames get corner-cut. It was
+// defaulted to 7 on the assumption that the SO-101 driver was one of those. It is not: that
+// driver commands one coordinated straight-line segment per waypoint and paces the stream
+// against the arm's measured position (viam-devrel/so-101#43), so every interpolated point
+// lands ON the segment the arm was already going to travel and gates nothing -- the points
+// sit closer together than the driver's own dwell tolerance. The path is identical either
+// way; interpolation just multiplies waypoints, and with them serial-bus traffic, by
+// steps+1.
+//
+// Raise it only for an arm that blends. See "Playback fidelity" in the README.
+const defaultInterpolationSteps = 0
 
 const (
 	stateIdle      = "idle"
@@ -613,7 +627,9 @@ func (s *armRecorderRecorder) playLoop(ctx context.Context, done chan struct{}, 
 		cancel2()
 	}
 
-	// Arm goroutine: one call that blends through all remaining waypoints.
+	// Arm goroutine: one call carrying all remaining waypoints. What the driver does with
+	// them is up to the driver -- see "Playback fidelity" in the README; this module's job
+	// ends at handing over the list.
 	// NOTE: this assumes the arm driver honors context cancellation to return from
 	// the blocking MoveThroughJointPositions call; if it doesn't, stopPlayback/Close
 	// would block on <-done.

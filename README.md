@@ -13,7 +13,7 @@ See the [reactor documentation](./devrel_arm-recorder_reactor.md) for informatio
 - **Single activity at a time.** Only one operation (recording or playback) runs at a time. Attempting to start a second while one is active returns an error.
 - **Playback engine — two-phase motion.**
   1. **Safe-entry move.** The arm is commanded to the first recorded frame via a single-waypoint `MoveThroughJointPositions` call so that the configured `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` limits apply. If a gripper is in use, it is simultaneously set to its first recorded position. Both run concurrently; an error in either aborts the entry and stops the arm. **Safety note:** when no velocity/acceleration limits are configured, this initial move runs at the arm driver's default speed and can be a large sweep from the arm's current pose — configure limits (or manually position the arm near the start pose) before testing on hardware.
-  2. **Smooth main motion.** The remaining frames are passed to a single `MoveThroughJointPositions` call, which blends through all waypoints in one continuous motion. If a gripper is in use, its positions are stepped on a parallel ticker running at the session's recorded `frequency_hz`.
+  2. **Main motion.** The remaining frames are passed to a single `MoveThroughJointPositions` call as one waypoint list. How that list becomes motion is the **arm driver's** decision, not this module's — see [Playback fidelity](#playback-fidelity). If a gripper is in use, its positions are stepped on a parallel ticker running at the session's recorded `frequency_hz`.
 - **Playback duration is governed by arm speed, not wall clock.** `max_velocity_rads_per_sec` and `max_acceleration_rads_per_sec` apply to the **entire** playback motion — including the initial safe-entry move to the first recorded frame — when those attributes are set; otherwise the arm driver's defaults apply to all moves. Total playback duration will therefore differ from recording duration. Gripper sync is best-effort wall-clock aligned to the recording frequency — it may drift relative to arm motion.
 - **Playback failures stop the arm.** Any error during playback (arm motion, gripper command, or context cancellation from `stop_playback`/`Close`) causes the arm to be halted immediately. Internal failures (not user-requested stops) are surfaced in `Readings()` as `last_error`.
 - **Session storage.** Sessions are stored as `<session>.json` under `$VIAM_MODULE_DATA`. If that environment variable is not set (e.g. on a dev workstation), the component falls back to a temporary directory under `os.TempDir()` and logs a warning. Viam sets `VIAM_MODULE_DATA` automatically when the module is deployed via the Viam platform.
@@ -23,12 +23,22 @@ See the [reactor documentation](./devrel_arm-recorder_reactor.md) for informatio
 
 ## Playback fidelity
 
-`MoveThroughJointPositions` blends continuously through waypoints, which means it can corner-cut past sparse recorded frames — the actual arm path may deviate from the recorded path between distant waypoints. The `playback_interpolation_steps` attribute controls how many linearly-interpolated waypoints are inserted between each consecutive pair of recorded frames before the blended move is issued.
+**This module hands the recorded frames to the arm driver and the driver decides what they mean.** `MoveThroughJointPositions` is specified as "move through these joint configurations in order"; it does not say how. Drivers differ, and playback fidelity is mostly a property of the driver, not of this module.
 
-- **Default is 10.** A value of 10 inserts 10 intermediate points between each pair of recorded frames, which is a good starting point for typical recordings.
-- **Set to 0 to disable.** With `playback_interpolation_steps: 0`, recorded frames are passed directly to `MoveThroughJointPositions` — this exactly reproduces behavior from before this feature was added.
-- **Recommended range: 5–20.** Raise the value for faster-moving or sparser recordings where the arm covers more distance between frames. Very large values produce more waypoints and may slightly increase the time spent building the waypoint list, but do not change overall playback duration (which is governed by `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` or the arm driver's defaults).
+Two behaviors to know about in the driver you are replaying on:
+
+- **Does it pace the stream against the arm's real position?** If it writes every waypoint back-to-back without waiting, the arm may never act on the intermediate ones — each goal supersedes the last — and playback collapses to a move from the first recorded frame to the last. Because a recording typically starts and ends near rest, that looks like an arm that barely moves. This is worth checking first if playback looks dead; it is not something interpolation can fix.
+- **Does it blend a spline through the waypoint list?** A driver that does can corner-cut past sparse recorded frames, so the arm's path bows away from the recorded path between distant waypoints. This is what `playback_interpolation_steps` is for.
+
+### `playback_interpolation_steps`
+
+Inserts N linearly-interpolated waypoints between each consecutive pair of recorded frames before the move is issued.
+
+- **Default is 0 — off.** On a driver that commands one segment per waypoint, every interpolated point lands *on* the straight line the arm was already going to travel, so the path is identical and the only effect is `steps+1` times as many waypoints and as much bus traffic. Most drivers behave this way, including [`devrel:so101:arm`](https://github.com/viam-devrel/so-101).
+- **Raise it for a blending driver.** 5–20 is a sensible range; higher for faster or sparser recordings, where the arm covers more distance between frames. It does not change overall playback duration, which is governed by `max_velocity_rads_per_sec`/`max_acceleration_rads_per_sec` or the driver's defaults.
 - **Applies to the arm path only.** The gripper track is driven by a parallel wall-clock ticker aligned to the recording frequency and is not affected by interpolation.
+
+> **Note on the previous default.** This defaulted to `7` on the assumption that `devrel:so101:arm` blended through waypoints. It does not — it issues one coordinated straight-line segment per waypoint and paces the stream against measured joint positions ([so-101#43](https://github.com/viam-devrel/so-101/pull/43)). Interpolation was therefore paying for waypoints that changed nothing about the path. Configs that set the attribute explicitly are unaffected.
 
 ## Session file format
 
@@ -82,7 +92,7 @@ These steps verify the module on a real or simulated arm connected to a Viam mac
    ```json
    {"command": "play", "session": "test1"}
    ```
-   Observe the arm move to the first recorded frame (safe-entry), then execute a single smooth blended motion through the remaining frames. During playback, `Readings()` shows `state: "playing"`. After completion, `state` returns to `"idle"`.
+   Observe the arm move to the first recorded frame (safe-entry), then travel through the remaining frames in one continuous motion. During playback, `Readings()` shows `state: "playing"`. After completion, `state` returns to `"idle"`. **If the arm reaches the first frame and then barely moves, the recording is probably fine** — check whether the arm driver paces its waypoint stream, per [Playback fidelity](#playback-fidelity).
 
 6. **Stop playback early (optional).**
    While playback is running, send:
@@ -121,7 +131,7 @@ These steps assume the module is configured with a `gripper` attribute pointing 
    ```json
    {"command": "play", "session": "grip-test"}
    ```
-   Observe the arm and gripper both move to their first recorded positions concurrently (safe entry). Then watch the arm execute its smooth blended motion while the gripper steps through its recorded positions. Check `Readings()` during playback — `gripper_position` should update as playback proceeds.
+   Observe the arm and gripper both move to their first recorded positions concurrently (safe entry). Then watch the arm travel through its recorded frames while the gripper steps through its recorded positions. Check `Readings()` during playback — `gripper_position` should update as playback proceeds.
 
 5. **Verify no errors.**
    After playback completes, confirm `Readings()` does not contain `last_error`. If it does, the error message describes which phase failed.

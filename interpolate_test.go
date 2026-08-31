@@ -33,8 +33,11 @@ func TestInterpolateFramesLength(t *testing.T) {
 }
 
 func TestInterpolationStepsDefault(t *testing.T) {
-	if (&Config{}).interpolationSteps() != defaultInterpolationSteps {
-		t.Fatalf("nil should default to %d", defaultInterpolationSteps)
+	// Pinned as a literal, not against the constant: the default being OFF is the decision
+	// worth guarding. Interpolation only helps an arm driver that blends a spline through the
+	// waypoint list, and it costs steps+1 times the bus traffic on one that does not.
+	if got := (&Config{}).interpolationSteps(); got != 0 {
+		t.Fatalf("interpolation should be off unless configured, got %d", got)
 	}
 	zero := 0
 	if (&Config{PlaybackInterpolationSteps: &zero}).interpolationSteps() != 0 {
