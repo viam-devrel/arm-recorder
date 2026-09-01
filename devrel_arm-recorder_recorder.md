@@ -30,6 +30,16 @@ The following attribute template can be used to configure this model:
 | `home_pose` | string | no | — | Name of a switch component whose "go to" position replays a saved pose, such as `erh:vmodutils:arm-position-saver`. The arm returns there after a playback completes. Omitting this leaves the arm at the last recorded frame. See [Returning home](#returning-home). |
 | `playback_interpolation_steps` | integer | no | `7` | Number of linearly-interpolated waypoints inserted between each consecutive pair of recorded frames before the blended arm move. Set to `0` to disable interpolation and pass recorded frames directly (reproduces pre-interpolation behavior). Must not be negative. See [Playback fidelity](#playback-fidelity) for guidance on choosing a value. |
 
+### Joint limits
+
+Recorded frames are clamped to the arm's declared joint limits — read once per session from the arm's kinematic model — before they are stored.
+
+This exists because a servo's calibrated range can extend slightly past what the arm's model declares. A pose reached by hand-guiding or teleoperation is therefore not necessarily one the arm can be commanded back to: RDK's arm client validates every waypoint against the model and refuses the whole move, so a faithfully-recorded session can be unplayable. Clamping at capture keeps playback a plain replay of what was stored rather than a transformation applied on the way out.
+
+- The adjustment is typically a fraction of a degree and imperceptible in motion.
+- `stop_recording` reports `clamped_frames` when any frame was adjusted, so it is visible rather than silent. A large count means the arm spent much of the recording outside what its model allows, which is worth knowing.
+- If the arm reports no kinematic model, frames are recorded unclamped and a warning is logged — recording without limits beats not recording.
+
 ### Playback fidelity
 
 `MoveThroughJointPositions` blends continuously through waypoints and can corner-cut past sparse recorded frames. `playback_interpolation_steps` inserts linearly-interpolated waypoints between each consecutive pair of recorded frames so the blended path follows the recording more closely.
@@ -124,6 +134,8 @@ Stop the recording loop and save buffered frames to `$VIAM_MODULE_DATA/<session>
 ```json
 {"status": "saved", "session": "my-motion", "frame_count": 150}
 ```
+
+`clamped_frames` is also present when any frame was adjusted to fit the arm's joint limits — see [Joint limits](#joint-limits).
 
 ---
 

@@ -13,6 +13,7 @@ import (
 	"go.viam.com/rdk/components/sensor"
 	toggleswitch "go.viam.com/rdk/components/switch"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 )
 
@@ -138,6 +139,8 @@ type armRecorderRecorder struct {
 	state            string
 	session          string
 	frames           [][]float64
+	jointLimits      []referenceframe.Limit
+	clampedFrames    int
 	gripperPositions []float64
 	workerCancel     context.CancelFunc
 	workerDone       chan struct{}
@@ -334,6 +337,8 @@ func (s *armRecorderRecorder) startRecording(cmd map[string]interface{}) (map[st
 	s.session = session
 	s.frames = nil
 	s.gripperPositions = nil
+	s.jointLimits = s.armJointLimits(context.Background())
+	s.clampedFrames = 0
 	s.lastError = ""
 	s.workerCancel = cancel
 	s.workerDone = done
@@ -362,6 +367,18 @@ func (s *armRecorderRecorder) setLastError(err error) {
 	s.mu.Unlock()
 }
 
+// armJointLimits reads the arm's declared joint limits, used to clamp captured
+// frames. Returns nil if the arm has no kinematic model, in which case frames
+// are recorded unclamped.
+func (s *armRecorderRecorder) armJointLimits(ctx context.Context) []referenceframe.Limit {
+	model, err := s.arm.Kinematics(ctx)
+	if err != nil || model == nil {
+		s.logger.Warnf("recording without joint limits: %v", err)
+		return nil
+	}
+	return model.DoF()
+}
+
 func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	interval := time.Duration(float64(time.Second) / s.freqHz)
@@ -380,6 +397,16 @@ func (s *armRecorderRecorder) recordLoop(ctx context.Context, done chan struct{}
 			}
 			frame := make([]float64, len(joints))
 			copy(frame, joints)
+
+			s.mu.Lock()
+			limits := s.jointLimits
+			s.mu.Unlock()
+			if clamped, changed := clampFrame(frame, limits); changed {
+				frame = clamped
+				s.mu.Lock()
+				s.clampedFrames++
+				s.mu.Unlock()
+			}
 
 			var gripPos float64
 			if s.gripper != nil {
@@ -433,11 +460,22 @@ func (s *armRecorderRecorder) stopRecording() (map[string]interface{}, error) {
 	}
 	count := len(s.frames)
 	name := s.session
+	clamped := s.clampedFrames
 	s.state = stateIdle
 	s.workerCancel = nil
 	s.workerDone = nil
-	s.logger.Infof("saved session %q with %d frames", name, count)
-	return map[string]interface{}{"status": "saved", "session": name, "frame_count": count}, nil
+	if clamped > 0 {
+		s.logger.Infof("saved session %q with %d frames (%d clamped to joint limits)", name, count, clamped)
+	} else {
+		s.logger.Infof("saved session %q with %d frames", name, count)
+	}
+	out := map[string]interface{}{"status": "saved", "session": name, "frame_count": count}
+	if clamped > 0 {
+		// Surfaced rather than silent: a large count means the arm spent much of
+		// the recording outside what the model allows, which is worth knowing.
+		out["clamped_frames"] = clamped
+	}
+	return out, nil
 }
 
 func (s *armRecorderRecorder) play(cmd map[string]interface{}) (map[string]interface{}, error) {
