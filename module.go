@@ -367,9 +367,8 @@ func (s *armRecorderRecorder) setLastError(err error) {
 	s.mu.Unlock()
 }
 
-// armJointLimits reads the arm's declared joint limits, used to clamp captured
-// frames. Returns nil if the arm has no kinematic model, in which case frames
-// are recorded unclamped.
+// armJointLimits reads the arm's declared joint limits. Returns nil if the arm
+// has no kinematic model, in which case frames are recorded unclamped.
 func (s *armRecorderRecorder) armJointLimits(ctx context.Context) []referenceframe.Limit {
 	model, err := s.arm.Kinematics(ctx)
 	if err != nil || model == nil {
@@ -471,8 +470,6 @@ func (s *armRecorderRecorder) stopRecording() (map[string]interface{}, error) {
 	}
 	out := map[string]interface{}{"status": "saved", "session": name, "frame_count": count}
 	if clamped > 0 {
-		// Surfaced rather than silent: a large count means the arm spent much of
-		// the recording outside what the model allows, which is worth knowing.
 		out["clamped_frames"] = clamped
 	}
 	return out, nil
