@@ -32,9 +32,7 @@ The following attribute template can be used to configure this model:
 
 ### Joint limits
 
-Recorded frames are clamped to the arm's declared joint limits — read once per session from the arm's kinematic model — before they are stored.
-
-This exists because a servo's calibrated range can extend slightly past what the arm's model declares. A pose reached by hand-guiding or teleoperation is therefore not necessarily one the arm can be commanded back to: RDK's arm client validates every waypoint against the model and refuses the whole move, so a faithfully-recorded session can be unplayable. Clamping at capture keeps playback a plain replay of what was stored rather than a transformation applied on the way out.
+RDK's arm client rejects waypoints outside the arm model's joint limits, so recorded frames are clamped to those limits at capture.
 
 - The adjustment is typically a fraction of a degree and imperceptible in motion.
 - `stop_recording` reports `clamped_frames` when any frame was adjusted, so it is visible rather than silent. A large count means the arm spent much of the recording outside what its model allows, which is worth knowing.
