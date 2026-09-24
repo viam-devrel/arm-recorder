@@ -32,7 +32,14 @@ module.tar.gz: meta.json $(MODULE_BINARY)
 ifneq ($(VIAM_TARGET_OS), windows)
 	strip $(MODULE_BINARY)
 endif
+ifeq ($(VIAM_TARGET_OS), windows)
+	cp meta.json meta.json.orig
+	jq '.entrypoint = "bin/arm-recorder.exe"' meta.json.orig > meta.json
+endif
 	tar czf $@ $(TAR_FILES)
+ifeq ($(VIAM_TARGET_OS), windows)
+	mv meta.json.orig meta.json
+endif
 
 module: test module.tar.gz
 
