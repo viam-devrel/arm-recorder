@@ -6,6 +6,20 @@
   "description": "Record arm and gripper motions as named sessions, then play them back on demand",
   "applications": null,
   "markdown_link": "README.md",
+  "models": [
+    {
+      "api": "rdk:component:sensor",
+      "model": "devrel:arm-recorder:recorder",
+      "markdown_link": "devrel_arm-recorder_recorder.md",
+      "short_description": "Record arm and gripper motion as named sessions, then play them back"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "devrel:arm-recorder:reactor",
+      "markdown_link": "devrel_arm-recorder_reactor.md",
+      "short_description": "Play recorded sessions in response to what a vision service detects"
+    }
+  ],
   "entrypoint": "bin/arm-recorder",
   "first_run": "",
   "build": {
@@ -15,7 +29,8 @@
     "arch": [
       "linux/amd64",
       "linux/arm64",
-      "darwin/arm64"
+      "darwin/arm64",
+      "windows/amd64"
     ]
   }
 }
